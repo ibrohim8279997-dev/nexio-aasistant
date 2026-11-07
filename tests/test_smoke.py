@@ -73,3 +73,19 @@ async def test_expense_flow(app, db, groq):
     await dp.feed_update(bot, callback_update(ADMIN_ID, ExpCb(action="sum", period="day").pack()))
     summary = bot.texts()[-1]
     assert "60 000 сум" in summary and "$5.00" in summary, summary
+
+
+async def test_stats_buttons(app, db):
+    from bot.keyboards import StatsCb
+    from tests.fakebot import callback_update
+
+    dp, bot, _ = app
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/spend еда 50000"))
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/add спорт"))
+    user = await db.get_user_by_tg(ADMIN_ID)
+    (task,) = await db.open_tasks(user["id"])
+    await db.complete_task(user["id"], task["id"], task["due_at"])
+    for action in ("exp_days", "exp_cat", "tasks_days", "tracker"):
+        await dp.feed_update(bot, callback_update(ADMIN_ID, StatsCb(action=action).pack()))
+    assert bot.methods().count("SendPhoto") == 3
+    assert any("Серия" in t for t in bot.texts())

@@ -10,9 +10,10 @@ from aiogram.types import InlineKeyboardMarkup
 
 from bot.ai.actions import AddExpense, AddTask, CompleteTask, ListTasks, Reply, ShowStats
 from bot.db import Database
-from bot.keyboards import task_list_kb
+from bot.keyboards import stats_menu, task_list_kb
 from bot.services import expenses as expenses_service
 from bot.services import tasks as tasks_service
+from bot.services import tracker
 from bot.services.rates import RatesService
 from bot.timeutil import now_local, to_db
 
@@ -74,7 +75,7 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
         return Answer(await expenses_service.summary_text(db, deps.rates, user_id, action.period))
 
     if isinstance(action, ShowStats):
-        return Answer("Этот раздел ещё не подключён.")
+        return Answer(await tracker.tracker_text(db, user_id), stats_menu())
 
     if isinstance(action, Reply):
         return Answer(escape(action.text))

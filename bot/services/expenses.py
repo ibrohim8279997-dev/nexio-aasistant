@@ -11,7 +11,7 @@ from typing import Any
 from bot.ai.actions import MAX_AMOUNT, MAX_CATEGORY_LEN, MAX_NOTE_LEN
 from bot.db import Database
 from bot.services.rates import RateInfo, RatesService
-from bot.timeutil import now_local, now_utc, period_bounds, to_db
+from bot.timeutil import TZ, from_db, now_local, now_utc, period_bounds, to_db
 
 PERIOD_TITLES = {"day": "сегодня", "week": "7 дней", "month": "30 дней"}
 
@@ -197,3 +197,20 @@ def datetime_ru(iso: str) -> str:
         return date.fromisoformat(iso).strftime("%d.%m.%Y")
     except ValueError:
         return iso
+
+
+def daily_uzs(rows: list[dict[str, Any]], fallback_rate: float | None, days: list[date]) -> list[float]:
+    """Сумма расходов в сумах по локальным дням (USD без курса пропускаются)."""
+    index = {d: i for i, d in enumerate(days)}
+    values = [0.0] * len(days)
+    for r in rows:
+        created = from_db(r["created_at"])
+        i = index.get(created.astimezone(TZ).date()) if created else None
+        if i is None:
+            continue
+        rate = r.get("rate_used") or fallback_rate
+        if r["currency"] == "UZS":
+            values[i] += float(r["amount"])
+        elif rate:
+            values[i] += float(r["amount"]) * rate
+    return values
