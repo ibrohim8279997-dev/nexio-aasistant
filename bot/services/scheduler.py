@@ -1,9 +1,9 @@
-"""Фоновые задачи APScheduler: напоминания о задачах."""
+"""Фоновые задачи APScheduler: напоминания о задачах и об окончании подписки."""
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html import escape
 from typing import Any
 
@@ -14,7 +14,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.config import Settings
 from bot.db import Database
-from bot.keyboards import reminder_kb
+from bot.keyboards import reminder_kb, subscription_kb
+from bot.services import subscription as sub
 from bot.timeutil import TZ, now_utc, to_db
 
 log = logging.getLogger(__name__)
@@ -32,6 +33,10 @@ class BotScheduler:
     def start(self) -> None:
         common: dict[str, Any] = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 120}
         self.scheduler.add_job(self.task_reminders, "interval", minutes=1, id="task_reminders", **common)
+        self.scheduler.add_job(
+            self.subscription_reminders, "interval", hours=1, id="sub_reminders",
+            next_run_time=datetime.now(TZ) + timedelta(seconds=30), **common,
+        )
         self.scheduler.start()
         log.info("Планировщик запущен")
 
@@ -40,7 +45,7 @@ class BotScheduler:
             self.scheduler.shutdown(wait=False)
 
     def has_access(self, tg_id: int, sub_until: str | None) -> bool:
-        return True
+        return sub.has_access(tg_id, sub_until, self.settings.admin_id)
 
     async def _send(self, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> bool | None:
         """True — доставлено, False — не доставить никогда (бот заблокирован), None — повторить позже."""
@@ -76,3 +81,26 @@ class BotScheduler:
                 await self.db.mark_reminded(row["id"])
         except Exception:  # noqa: BLE001 — фоновая задача не должна падать молча
             log.exception("Ошибка в задаче напоминаний")
+
+    async def subscription_reminders(self) -> None:
+        """За 3 дня до конца подписки — одно напоминание с кнопкой оплаты."""
+        try:
+            now = now_utc()
+            users = await self.db.users_to_remind_sub(to_db(now), to_db(now + timedelta(days=sub.REMIND_DAYS_BEFORE)))
+            markup = subscription_kb(
+                self.settings.sub_price_xtr, self.settings.click_enabled, self.settings.click_price_uzs
+            )
+            for user in users:
+                if user["tg_id"] == self.settings.admin_id:
+                    continue
+                left = sub.days_left(user["sub_until"], now)
+                text = (
+                    f"⭐ Подписка заканчивается {sub.fmt_until(user['sub_until'])} (осталось {left} дн.).\n"
+                    "Продлите, чтобы не потерять напоминания и статистику."
+                )
+                result = await self._send(user["tg_id"], text, markup)
+                if result is None:
+                    break
+                await self.db.mark_sub_notified(user["id"])
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка в задаче напоминаний о подписке")

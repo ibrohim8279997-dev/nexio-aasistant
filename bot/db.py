@@ -163,6 +163,13 @@ class Database:
         assert user is not None
         return user
 
+    async def ensure_user(self, tg_id: int, now: str) -> dict[str, Any]:
+        """Создать пользователя по tg_id, не трогая существующего."""
+        await self._write("INSERT OR IGNORE INTO users (tg_id, created_at) VALUES (?, ?)", (tg_id, now))
+        user = await self.get_user_by_tg(tg_id)
+        assert user is not None
+        return user
+
     async def get_user_by_tg(self, tg_id: int) -> dict[str, Any] | None:
         return await self._one("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
 

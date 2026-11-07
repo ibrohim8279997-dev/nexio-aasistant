@@ -89,3 +89,89 @@ async def test_stats_buttons(app, db):
         await dp.feed_update(bot, callback_update(ADMIN_ID, StatsCb(action=action).pack()))
     assert bot.methods().count("SendPhoto") == 3
     assert any("Серия" in t for t in bot.texts())
+
+
+async def test_paywall_and_stars_payment(app, db, groq):
+    from aiogram.types import PreCheckoutQuery, SuccessfulPayment, Update
+
+    from bot.keyboards import PayCb
+    from bot.services.subscription import Payload
+    from tests.fakebot import callback_update, make_user
+
+    dp, bot, settings = app
+    uid = 777
+    await dp.feed_update(bot, message_update(uid, "/start"))
+    await dp.feed_update(bot, message_update(uid, "купить хлеб"))
+    assert "подписка" in bot.texts()[-1] and not groq.prompts  # ИИ не вызывался
+
+    await dp.feed_update(bot, callback_update(uid, PayCb(method="stars").pack()))
+    invoice = next(c for c in bot.calls if type(c).__name__ == "SendInvoice")
+    assert invoice.currency == "XTR" and invoice.prices[0].amount == 250 and invoice.provider_token == ""
+
+    payload = Payload("stars", uid, 30).pack()
+    pcq = PreCheckoutQuery(id="q1", from_user=make_user(uid), currency="XTR", total_amount=250, invoice_payload=payload)
+    await dp.feed_update(bot, Update(update_id=9001, pre_checkout_query=pcq))
+    answer = next(c for c in bot.calls if type(c).__name__ == "AnswerPreCheckoutQuery")
+    assert answer.ok is True
+
+    sp = SuccessfulPayment(
+        currency="XTR", total_amount=250, invoice_payload=payload,
+        telegram_payment_charge_id="ch_1", provider_payment_charge_id="",
+    )
+    upd = message_update(uid, None, successful_payment=sp)
+    await dp.feed_update(bot, upd)
+    await dp.feed_update(bot, upd)  # повтор апдейта не продлевает дважды
+    user = await db.get_user_by_tg(uid)
+    assert user["sub_until"] is not None and (await db.payments_summary())["n"] == 1
+
+    groq.replies.append('{"actions":[{"type":"reply","text":"ok"}]}')
+    await dp.feed_update(bot, message_update(uid, "привет"))
+    assert groq.prompts  # теперь доступ есть
+
+
+async def test_bad_pre_checkout_rejected(app):
+    from aiogram.types import PreCheckoutQuery, Update
+
+    from bot.services.subscription import Payload
+    from tests.fakebot import make_user
+
+    dp, bot, _ = app
+    payload = Payload("stars", 778, 30).pack()
+    pcq = PreCheckoutQuery(id="q2", from_user=make_user(778), currency="XTR", total_amount=1, invoice_payload=payload)
+    await dp.feed_update(bot, Update(update_id=9002, pre_checkout_query=pcq))
+    answer = next(c for c in bot.calls if type(c).__name__ == "AnswerPreCheckoutQuery")
+    assert answer.ok is False
+
+
+async def test_admin_commands(app, db):
+    dp, bot, _ = app
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/grant 4242 10"))
+    user = await db.get_user_by_tg(4242)
+    assert user and user["sub_until"]
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/users"))
+    assert "4242" in bot.texts()[-1]
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/stats"))
+    assert "Пользователей" in bot.texts()[-1]
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/revoke 4242"))
+    assert (await db.get_user_by_tg(4242))["sub_until"] is None
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/setsecret click_provider_token 1:TEST:x"))
+    assert "DeleteMessage" in bot.methods()
+
+    # не-админ не может выдать себе доступ
+    await dp.feed_update(bot, message_update(4242, "/grant 4242 999"))
+    assert (await db.get_user_by_tg(4242))["sub_until"] is None
+
+
+async def test_subscription_reminder(app, db):
+    from datetime import timedelta
+
+    from bot.services.scheduler import BotScheduler
+    from bot.timeutil import now_utc, to_db
+
+    dp, bot, settings = app
+    user = await db.ensure_user(31337, to_db(now_utc()))
+    await db.set_sub_until(user["id"], to_db(now_utc() + timedelta(days=2)))
+    sched = BotScheduler(bot, db, settings)
+    await sched.subscription_reminders()
+    await sched.subscription_reminders()
+    assert sum("Подписка заканчивается" in t for t in bot.texts()) == 1

@@ -24,7 +24,7 @@ HELP_TEXT = (
     "/add <i>текст</i> — задача без ИИ: «/add завтра 09:30 спортзал»\n"
     "/spend <i>сумма [usd] категория [заметка]</i> — расход без ИИ\n"
     "/today, /tomorrow — задачи\n"
-    "/subscription — подписка\n"
+    "/subscription — подписка, /paysupport — помощь с оплатой\n"
     "/cancel — отменить ввод"
 )
 
@@ -44,13 +44,13 @@ async def cmd_help(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu())
 
 
-@router.message(Command("menu", "cancel"))
+@router.message(Command("menu", "cancel"), flags={"public": True})
 async def cmd_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Главное меню:", reply_markup=main_menu())
 
 
-@router.callback_query(Menu.filter(F.name == "main"))
+@router.callback_query(Menu.filter(F.name == "main"), flags={"public": True})
 async def cb_main(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await call.answer()

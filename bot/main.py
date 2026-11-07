@@ -17,7 +17,7 @@ from bot.crypto import Crypto, SecretStore
 from bot.db import Database
 from bot.handlers import get_routers
 from bot.logging_setup import setup_logging
-from bot.middlewares import ThrottlingMiddleware, UserMiddleware
+from bot.middlewares import AccessMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.services.rates import RatesService
 from bot.services.scheduler import BotScheduler
 
@@ -30,6 +30,7 @@ COMMANDS = [
     BotCommand(command="add", description="Добавить задачу"),
     BotCommand(command="spend", description="Добавить расход"),
     BotCommand(command="subscription", description="Подписка"),
+    BotCommand(command="paysupport", description="Помощь с оплатой"),
     BotCommand(command="help", description="Помощь"),
 ]
 
@@ -47,6 +48,9 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
     dp.message.outer_middleware(user_mw)
     dp.callback_query.outer_middleware(user_mw)
     dp.pre_checkout_query.outer_middleware(user_mw)
+    access = AccessMiddleware()  # inner: видит флаги хендлеров (public)
+    dp.message.middleware(access)
+    dp.callback_query.middleware(access)
 
     dp.include_routers(*get_routers())
 
