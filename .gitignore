@@ -1,0 +1,26 @@
+# Секреты — никогда не коммитить
+.env
+.env.*
+!.env.example
+
+# Данные и логи
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

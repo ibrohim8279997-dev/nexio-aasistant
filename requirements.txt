@@ -1,0 +1,8 @@
+aiogram==3.31.0
+aiosqlite==0.22.1
+APScheduler==3.11.3
+matplotlib==3.11.2
+httpx==0.28.1
+cryptography==50.0.2
+python-dotenv==1.2.4
+tzdata>=2024.1
