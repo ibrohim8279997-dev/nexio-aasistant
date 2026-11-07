@@ -40,6 +40,25 @@ class FakeGroq:
         return self.transcript
 
 
+class FakeRates:
+    """Курс без сети: фиксированный 12 000 сум за $."""
+
+    def __init__(self, db, rate: float | None = 12000.0) -> None:
+        from bot.services.rates import RateInfo
+
+        self.info = RateInfo(rate=rate, date="2026-11-07") if rate else None
+
+    async def get_usd_rate(self):
+        from bot.services.rates import RateUnavailableError
+
+        if self.info is None:
+            raise RateUnavailableError("нет")
+        return self.info
+
+    async def try_get(self):
+        return self.info
+
+
 def make_settings(tmp_path, **over) -> Settings:
     values = dict(
         bot_token="123456:" + "A" * 35,
@@ -78,6 +97,6 @@ def app(tmp_path, db, groq):
 
     settings = make_settings(tmp_path)
     secrets = SecretStore(db, Crypto(settings.encryption_key))
-    deps = dict(db=db, secrets=secrets, groq=groq)
+    deps = dict(db=db, secrets=secrets, groq=groq, rates=FakeRates(db))
     dp = build_dispatcher(settings, **deps)
     return dp, FakeBot(), settings

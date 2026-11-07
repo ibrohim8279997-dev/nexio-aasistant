@@ -18,6 +18,7 @@ from bot.db import Database
 from bot.handlers import get_routers
 from bot.logging_setup import setup_logging
 from bot.middlewares import ThrottlingMiddleware, UserMiddleware
+from bot.services.rates import RatesService
 from bot.services.scheduler import BotScheduler
 
 log = logging.getLogger("bot")
@@ -70,9 +71,10 @@ async def run_bot(settings: Settings, crypto: Crypto) -> None:
     await db.migrate()
     secrets = SecretStore(db, crypto)
     groq = GroqClient(settings.groq_api_key, settings.text_model, settings.stt_model)
+    rates = RatesService(db)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings, db=db, secrets=secrets, groq=groq)
+    dp = build_dispatcher(settings, db=db, secrets=secrets, groq=groq, rates=rates)
     scheduler = BotScheduler(bot, db, settings)
     try:
         scheduler.start()
@@ -86,6 +88,7 @@ async def run_bot(settings: Settings, crypto: Crypto) -> None:
         scheduler.shutdown()
         await bot.session.close()
         await groq.close()
+        await rates.close()
         await db.close()
         log.info("Бот остановлен")
 

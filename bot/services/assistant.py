@@ -11,7 +11,9 @@ from aiogram.types import InlineKeyboardMarkup
 from bot.ai.actions import AddExpense, AddTask, CompleteTask, ListTasks, Reply, ShowStats
 from bot.db import Database
 from bot.keyboards import task_list_kb
+from bot.services import expenses as expenses_service
 from bot.services import tasks as tasks_service
+from bot.services.rates import RatesService
 from bot.timeutil import now_local, to_db
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ class Answer:
 class AssistantDeps:
     db: Database
     user: dict[str, Any]
+    rates: RatesService
 
 
 async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
@@ -34,7 +37,7 @@ async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
     for action in actions:
         try:
             answers.append(await _execute_one(action, deps))
-        except tasks_service.TaskInputError as exc:
+        except (tasks_service.TaskInputError, expenses_service.ExpenseInputError) as exc:
             answers.append(Answer(f"⚠️ {exc}"))
     return answers
 
@@ -57,7 +60,20 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
         view = await tasks_service.render_day(db, user_id, action.day)
         return Answer(view.text, task_list_kb(view.buttons, action.day))
 
-    if isinstance(action, (AddExpense, ShowStats)):
+    if isinstance(action, AddExpense):
+        _, info = await expenses_service.create_expense(
+            db, deps.rates, user_id, action.amount, action.currency, action.category, action.note
+        )
+        return Answer(
+            expenses_service.created_text(
+                action.amount, action.currency, expenses_service.clean_category(action.category), action.note, info
+            )
+        )
+
+    if isinstance(action, ShowStats) and action.topic == "expenses":
+        return Answer(await expenses_service.summary_text(db, deps.rates, user_id, action.period))
+
+    if isinstance(action, ShowStats):
         return Answer("Этот раздел ещё не подключён.")
 
     if isinstance(action, Reply):

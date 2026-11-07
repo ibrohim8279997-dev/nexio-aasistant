@@ -60,3 +60,16 @@ async def test_reminder_sent_once(app, db):
     await sched.task_reminders()
     await sched.task_reminders()
     assert sum("выпить воды" in t for t in bot.texts()) == 1
+
+
+async def test_expense_flow(app, db, groq):
+    from bot.keyboards import ExpCb
+    from tests.fakebot import callback_update
+
+    dp, bot, _ = app
+    await dp.feed_update(bot, message_update(ADMIN_ID, "/spend такси 24000"))
+    groq.replies.append(json.dumps({"actions": [{"type": "add_expense", "amount": 3, "currency": "USD", "category": "кофе"}]}))
+    await dp.feed_update(bot, message_update(ADMIN_ID, "кофе за 3 доллара"))
+    await dp.feed_update(bot, callback_update(ADMIN_ID, ExpCb(action="sum", period="day").pack()))
+    summary = bot.texts()[-1]
+    assert "60 000 сум" in summary and "$5.00" in summary, summary

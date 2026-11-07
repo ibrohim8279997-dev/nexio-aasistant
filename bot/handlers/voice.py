@@ -17,6 +17,7 @@ from bot.ai.actions import ActionParseError, build_messages, parse_actions
 from bot.ai.groq_client import GroqClient, GroqError
 from bot.db import Database
 from bot.services import assistant
+from bot.services.rates import RatesService
 from bot.services.tasks import open_tasks_for_prompt
 from bot.timeutil import context_now_text, now_local
 
@@ -71,7 +72,13 @@ async def process_text(message: Message, text: str, bot: Bot, groq: GroqClient, 
 
 @router.message(F.voice | F.audio)
 async def on_voice(
-    message: Message, bot: Bot, state: FSMContext, groq: GroqClient, db: Database, db_user: dict[str, Any]
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+    groq: GroqClient,
+    db: Database,
+    rates: RatesService,
+    db_user: dict[str, Any],
 ) -> None:
     await state.clear()
     media = message.voice or message.audio
@@ -101,9 +108,11 @@ async def on_voice(
         return
 
     await message.answer(f"🎙 <i>{escape(text[:MAX_TEXT_LEN])}</i>")
-    await process_text(message, text, bot, groq, assistant.AssistantDeps(db=db, user=db_user))
+    await process_text(message, text, bot, groq, assistant.AssistantDeps(db=db, user=db_user, rates=rates))
 
 
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
-async def on_text(message: Message, bot: Bot, groq: GroqClient, db: Database, db_user: dict[str, Any]) -> None:
-    await process_text(message, message.text or "", bot, groq, assistant.AssistantDeps(db=db, user=db_user))
+async def on_text(
+    message: Message, bot: Bot, groq: GroqClient, db: Database, rates: RatesService, db_user: dict[str, Any]
+) -> None:
+    await process_text(message, message.text or "", bot, groq, assistant.AssistantDeps(db=db, user=db_user, rates=rates))
