@@ -1,0 +1,78 @@
+"""Фоновые задачи APScheduler: напоминания о задачах."""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import timedelta
+from html import escape
+from typing import Any
+
+from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter
+from aiogram.types import InlineKeyboardMarkup
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from bot.config import Settings
+from bot.db import Database
+from bot.keyboards import reminder_kb
+from bot.timeutil import TZ, now_utc, to_db
+
+log = logging.getLogger(__name__)
+
+STALE_AFTER = timedelta(hours=12)  # если бот был выключен дольше — старые напоминания не шлём
+
+
+class BotScheduler:
+    def __init__(self, bot: Bot, db: Database, settings: Settings) -> None:
+        self.bot = bot
+        self.db = db
+        self.settings = settings
+        self.scheduler = AsyncIOScheduler(timezone=TZ)
+
+    def start(self) -> None:
+        common: dict[str, Any] = {"max_instances": 1, "coalesce": True, "misfire_grace_time": 120}
+        self.scheduler.add_job(self.task_reminders, "interval", minutes=1, id="task_reminders", **common)
+        self.scheduler.start()
+        log.info("Планировщик запущен")
+
+    def shutdown(self) -> None:
+        if self.scheduler.running:
+            self.scheduler.shutdown(wait=False)
+
+    def has_access(self, tg_id: int, sub_until: str | None) -> bool:
+        return True
+
+    async def _send(self, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> bool | None:
+        """True — доставлено, False — не доставить никогда (бот заблокирован), None — повторить позже."""
+        try:
+            await self.bot.send_message(chat_id, text, reply_markup=markup)
+            return True
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after)
+            return None
+        except TelegramForbiddenError:
+            return False
+        except TelegramNetworkError as exc:
+            log.warning("Сеть Telegram недоступна: %s", type(exc).__name__)
+            return None
+        except TelegramAPIError as exc:
+            log.warning("Не удалось отправить сообщение: %s", type(exc).__name__)
+            return False
+
+    async def task_reminders(self) -> None:
+        try:
+            now = now_utc()
+            not_before = to_db(now - STALE_AFTER)
+            await self.db.skip_stale_reminders(not_before)
+            for row in await self.db.due_reminders(to_db(now), not_before):
+                if not self.has_access(row["tg_id"], row["sub_until"]):
+                    await self.db.mark_reminded(row["id"])
+                    continue
+                result = await self._send(
+                    row["tg_id"], f"⏰ <b>Напоминание</b>\n{escape(row['text'])}", reminder_kb(row["id"])
+                )
+                if result is None:
+                    break  # сеть/флуд-контроль — попробуем в следующую минуту
+                await self.db.mark_reminded(row["id"])
+        except Exception:  # noqa: BLE001 — фоновая задача не должна падать молча
+            log.exception("Ошибка в задаче напоминаний")

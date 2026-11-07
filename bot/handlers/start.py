@@ -8,6 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.handlers.common import show
 from bot.keyboards import Menu, main_menu
 
 router = Router(name="start")
@@ -53,6 +54,5 @@ async def cmd_menu(message: Message, state: FSMContext) -> None:
 async def cb_main(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await call.answer()
-    if call.message:
-        await call.message.answer("Главное меню:", reply_markup=main_menu())
+    await show(call, "Главное меню:", main_menu())
 

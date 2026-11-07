@@ -128,3 +128,59 @@ async def open_tasks_for_prompt(db: Database, user_id: int) -> list[str]:
         when = due.astimezone(TZ).strftime("%Y-%m-%d %H:%M" if task["has_time"] else "%Y-%m-%d") if due else "без срока"
         lines.append(f"#{task['id']} [{when}] {task['text']}")
     return lines
+
+
+# ---------- локальный разбор ввода (без ИИ) ----------
+
+_DAY_WORDS = {
+    "сегодня": 0, "bugun": 0, "завтра": 1, "ertaga": 1, "послезавтра": 2, "indinga": 2,
+}
+_DAY_RE = re.compile(r"(?<!\w)(" + "|".join(_DAY_WORDS) + r")(?!\w)", re.IGNORECASE)
+_DATE_RE = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{1,2})(?:\.(\d{2}|\d{4}))?(?![\d.])")
+_TIME_RE = re.compile(r"(?:(?<!\w)(?:в|soat)\s+)?(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])", re.IGNORECASE)
+
+
+@dataclass
+class ParsedTask:
+    text: str
+    day: date | None
+    at: time | None
+
+
+def parse_task_input(raw: str, today: date) -> ParsedTask:
+    """«завтра 15:00 позвонить маме», «12.11 09:30 врач», «купить хлеб» -> ParsedTask."""
+    text = raw
+    day: date | None = None
+    at: time | None = None
+
+    if m := _DAY_RE.search(text):
+        day = today + timedelta(days=_DAY_WORDS[m.group(1).lower()])
+        text = text[: m.start()] + " " + text[m.end() :]
+    elif m := _DATE_RE.search(text):
+        d, mth, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        year = (2000 + int(y) if len(y) == 2 else int(y)) if y else today.year
+        try:
+            day = date(year, mth, d)
+        except ValueError:
+            raise TaskInputError("Неверная дата. Формат: ДД.ММ или ДД.ММ.ГГГГ") from None
+        if not y and day < today:
+            day = date(year + 1, mth, d)
+        text = text[: m.start()] + " " + text[m.end() :]
+
+    if m := _TIME_RE.search(text):
+        at = time(int(m.group(1)), int(m.group(2)))
+        text = text[: m.start()] + " " + text[m.end() :]
+
+    return ParsedTask(text=re.sub(r"\s+", " ", text).strip(" ,.-—"), day=day, at=at)
+
+
+def move_one_hour(due: datetime, has_time: bool, now: datetime) -> datetime:
+    base = due if has_time and due > now else now
+    return (base + timedelta(hours=1)).replace(second=0, microsecond=0)
+
+
+def move_to_tomorrow(due: datetime, has_time: bool, now: datetime) -> datetime:
+    tomorrow = now.date() + timedelta(days=1)
+    if has_time:
+        return datetime.combine(tomorrow, due.astimezone(TZ).time(), tzinfo=TZ)
+    return local_midnight(tomorrow)

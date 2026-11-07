@@ -18,6 +18,7 @@ from bot.db import Database
 from bot.handlers import get_routers
 from bot.logging_setup import setup_logging
 from bot.middlewares import ThrottlingMiddleware, UserMiddleware
+from bot.services.scheduler import BotScheduler
 
 log = logging.getLogger("bot")
 
@@ -72,7 +73,9 @@ async def run_bot(settings: Settings, crypto: Crypto) -> None:
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = build_dispatcher(settings, db=db, secrets=secrets, groq=groq)
+    scheduler = BotScheduler(bot, db, settings)
     try:
+        scheduler.start()
         try:
             await bot.set_my_commands(COMMANDS)
         except Exception as exc:  # noqa: BLE001
@@ -80,6 +83,7 @@ async def run_bot(settings: Settings, crypto: Crypto) -> None:
         log.info("Бот запущен (long polling)")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        scheduler.shutdown()
         await bot.session.close()
         await groq.close()
         await db.close()

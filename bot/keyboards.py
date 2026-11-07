@@ -168,3 +168,14 @@ def subscription_kb(price_xtr: int, click_enabled: bool = False, click_price: in
         rows.append([btn(f"Click — {click_price:,} сум".replace(",", " "), PayCb(method="click"), "primary", "💳")])
     rows.append([home_button()])
     return _kb(rows)
+
+
+def reminder_kb(task_id: int) -> InlineKeyboardMarkup:
+    return _kb(
+        [
+            [
+                btn("Выполнено", TaskCb(action="done", task_id=task_id, day="remind"), "success", "✅"),
+                btn("+1 час", TaskCb(action="mv1h", task_id=task_id, day="remind"), "primary", "⏩"),
+            ]
+        ]
+    )

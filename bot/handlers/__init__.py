@@ -4,7 +4,7 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from bot.handlers import start, voice
+from bot.handlers import start, tasks, voice
 
 fallback_router = Router(name="fallback")
 
@@ -25,4 +25,4 @@ async def unsupported(message: Message) -> None:
 
 
 def get_routers() -> list[Router]:
-    return [start.router, voice.router, fallback_router]
+    return [start.router, tasks.router, voice.router, fallback_router]
