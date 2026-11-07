@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -11,9 +12,11 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, ErrorEvent
 
 from bot.config import BASE_DIR, ConfigError, Settings, load_settings
+from bot.crypto import Crypto, SecretStore
+from bot.db import Database
 from bot.handlers import get_routers
 from bot.logging_setup import setup_logging
-from bot.middlewares import ThrottlingMiddleware
+from bot.middlewares import ThrottlingMiddleware, UserMiddleware
 
 log = logging.getLogger("bot")
 
@@ -28,13 +31,19 @@ COMMANDS = [
 ]
 
 
-def build_dispatcher(settings: Settings) -> Dispatcher:
+def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
+    """deps попадают в хендлеры по имени аргумента: db, secrets, groq, rates, ..."""
     dp = Dispatcher()
     dp["settings"] = settings
+    dp.workflow_data.update(deps)
 
     throttling = ThrottlingMiddleware(settings.rate_limit_per_min, settings.admin_id)
     dp.message.outer_middleware(throttling)
     dp.callback_query.outer_middleware(throttling)
+    user_mw = UserMiddleware()
+    dp.message.outer_middleware(user_mw)
+    dp.callback_query.outer_middleware(user_mw)
+    dp.pre_checkout_query.outer_middleware(user_mw)
 
     dp.include_routers(*get_routers())
 
@@ -54,9 +63,13 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     return dp
 
 
-async def run_bot(settings: Settings) -> None:
+async def run_bot(settings: Settings, crypto: Crypto) -> None:
+    db = await Database.connect(settings.db_path)
+    await db.migrate()
+    secrets = SecretStore(db, crypto)
+
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings)
+    dp = build_dispatcher(settings, db=db, secrets=secrets)
     try:
         try:
             await bot.set_my_commands(COMMANDS)
@@ -66,20 +79,25 @@ async def run_bot(settings: Settings) -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await bot.session.close()
+        await db.close()
         log.info("Бот остановлен")
 
 
 def main() -> None:
     try:
         settings = load_settings()
+        crypto = Crypto(settings.encryption_key)
     except ConfigError as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         sys.exit(2)
     setup_logging(settings.log_level, settings.secret_values, BASE_DIR / "logs")
     try:
-        asyncio.run(run_bot(settings))
+        asyncio.run(run_bot(settings, crypto))
     except (KeyboardInterrupt, SystemExit):
         pass
+    except Exception as exc:  # noqa: BLE001 — логируем через фильтр секретов, run.sh перезапустит
+        log.critical("Бот упал: %s", type(exc).__name__, exc_info=exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Middleware: антиспам."""
+"""Middleware: антиспам, пользователь из БД."""
 from __future__ import annotations
 
 import logging
@@ -9,6 +9,8 @@ from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
+
+from bot.timeutil import now_utc, to_db
 
 log = logging.getLogger(__name__)
 
@@ -51,3 +53,14 @@ class ThrottlingMiddleware(BaseMiddleware):
                 await event.answer(text, show_alert=True)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось отправить предупреждение антиспама: %s", type(exc).__name__)
+
+
+class UserMiddleware(BaseMiddleware):
+    """Создаёт/находит пользователя в БД и кладёт его в data['db_user']."""
+
+    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        user = data.get("event_from_user")
+        db = data.get("db")
+        if user is not None and db is not None and not user.is_bot:
+            data["db_user"] = await db.get_or_create_user(user.id, user.username, user.first_name, to_db(now_utc()))
+        return await handler(event, data)
