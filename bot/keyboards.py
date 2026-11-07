@@ -89,9 +89,10 @@ def tasks_menu() -> InlineKeyboardMarkup:
     )
 
 
-def task_list_kb(task_ids: Sequence[int], day: str) -> InlineKeyboardMarkup:
+def task_list_kb(items: Sequence[tuple[int, int]], day: str) -> InlineKeyboardMarkup:
+    """items — пары (номер строки в списке, id задачи) для невыполненных задач."""
     rows = []
-    for num, task_id in enumerate(task_ids, start=1):
+    for num, task_id in items:
         rows.append(
             [
                 btn(str(num), TaskCb(action="done", task_id=task_id, day=day), "success", "✅"),

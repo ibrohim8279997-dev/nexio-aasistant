@@ -11,6 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, ErrorEvent
 
+from bot.ai.groq_client import GroqClient
 from bot.config import BASE_DIR, ConfigError, Settings, load_settings
 from bot.crypto import Crypto, SecretStore
 from bot.db import Database
@@ -67,9 +68,10 @@ async def run_bot(settings: Settings, crypto: Crypto) -> None:
     db = await Database.connect(settings.db_path)
     await db.migrate()
     secrets = SecretStore(db, crypto)
+    groq = GroqClient(settings.groq_api_key, settings.text_model, settings.stt_model)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings, db=db, secrets=secrets)
+    dp = build_dispatcher(settings, db=db, secrets=secrets, groq=groq)
     try:
         try:
             await bot.set_my_commands(COMMANDS)
@@ -79,6 +81,7 @@ async def run_bot(settings: Settings, crypto: Crypto) -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await bot.session.close()
+        await groq.close()
         await db.close()
         log.info("Бот остановлен")
 
