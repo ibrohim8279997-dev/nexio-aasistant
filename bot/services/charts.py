@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import threading
 from collections.abc import Sequence
 from datetime import date
 
@@ -39,6 +40,20 @@ plt.rcParams.update(
 )
 
 
+# pyplot не потокобезопасен, а графики строятся через asyncio.to_thread
+_LOCK = threading.Lock()
+
+
+def _locked(func):
+    def wrapper(*args, **kwargs):
+        with _LOCK:
+            return func(*args, **kwargs)
+
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
+
+
 def _money_short(value: float, _pos: int | None = None) -> str:
     if value >= 1_000_000:
         return f"{value / 1_000_000:.2f}".rstrip("0").rstrip(".") + " млн"
@@ -60,6 +75,7 @@ def _day_labels(days: Sequence[date]) -> list[str]:
     return [d.strftime("%d.%m") if i % step == 0 or i == len(days) - 1 else "" for i, d in enumerate(days)]
 
 
+@_locked
 def expenses_by_day(days: Sequence[date], values_uzs: Sequence[float]) -> bytes:
     fig, ax = plt.subplots(figsize=(10, 5))
     xs = range(len(days))
@@ -81,6 +97,7 @@ def expenses_by_day(days: Sequence[date], values_uzs: Sequence[float]) -> bytes:
     return _png(fig)
 
 
+@_locked
 def expenses_by_category(categories: Sequence[str], values_uzs: Sequence[float]) -> bytes:
     pairs = sorted(zip(categories, values_uzs), key=lambda p: p[1])[-10:]
     cats = [c[:22] for c, _ in pairs]
@@ -100,6 +117,7 @@ def expenses_by_category(categories: Sequence[str], values_uzs: Sequence[float])
     return _png(fig)
 
 
+@_locked
 def tasks_by_day(days: Sequence[date], done: Sequence[int], total: Sequence[int]) -> bytes:
     fig, ax = plt.subplots(figsize=(10, 5))
     xs = list(range(len(days)))

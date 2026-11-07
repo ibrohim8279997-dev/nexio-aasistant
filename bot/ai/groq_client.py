@@ -51,6 +51,10 @@ class GroqUnavailableError(GroqError):
 class GroqBadResponseError(GroqError):
     user_message = "🤔 Не удалось разобрать ответ ИИ. Попробуйте сформулировать иначе."
 
+    def __init__(self, message: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 class AudioTooLargeError(GroqError):
     user_message = "Файл слишком большой (максимум 25 МБ)."
@@ -150,7 +154,7 @@ class GroqClient:
                 log.error("Groq %s на %s: %s", response.status_code, url, _error_text(response))
                 if response.status_code in (401, 403):
                     raise GroqUnavailableError("auth")
-                raise GroqBadResponseError(f"HTTP {response.status_code}")
+                raise GroqBadResponseError(f"HTTP {response.status_code}", status=response.status_code)
             try:
                 return response.json()
             except ValueError as exc:
@@ -168,7 +172,15 @@ class GroqClient:
         }
         if "gpt-oss" in self.text_model:
             payload["reasoning_effort"] = "low"
-        data = await self._post("/chat/completions", self._text_window, json=payload)
+        try:
+            data = await self._post("/chat/completions", self._text_window, json=payload)
+        except GroqBadResponseError as exc:
+            if exc.status != 400:
+                raise
+            # Модель из .env может не поддерживать JSON-режим — повторяем без него, JSON всё равно проверим
+            payload.pop("response_format", None)
+            payload.pop("reasoning_effort", None)
+            data = await self._post("/chat/completions", self._text_window, json=payload)
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:

@@ -61,3 +61,20 @@ def test_rate_window():
     w.hit(61)
     wait, daily = w.wait_time(200)
     assert daily
+
+
+async def test_json_mode_400_falls_back():
+    import json as _json
+
+    bodies = []
+
+    def handler(request):
+        body = _json.loads(request.content)
+        bodies.append(body)
+        if "response_format" in body:
+            return httpx.Response(400, json={"error": {"code": "json_validate_failed", "message": "bad"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"actions": []}'}}]})
+
+    client = make_client(handler)
+    assert await client.chat_json([{"role": "user", "content": "x"}]) == '{"actions": []}'
+    assert len(bodies) == 2 and "response_format" not in bodies[1]
