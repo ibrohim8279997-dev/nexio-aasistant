@@ -13,7 +13,7 @@ from bot.config import Settings
 from bot.crypto import DecryptError, SecretStore
 from bot.db import Database
 from bot.handlers.common import show
-from bot.keyboards import Menu, PayCb, main_menu, subscription_kb
+from bot.keyboards import Menu, PayCb, back_home, main_menu, subscription_kb
 from bot.services import subscription as sub
 from bot.timeutil import now_utc, to_db
 
@@ -24,7 +24,16 @@ PUBLIC = {"public": True}
 
 
 def _sub_kb(settings: Settings):
+    if not settings.subscription_enabled:
+        return back_home()
     return subscription_kb(settings.sub_price_xtr, settings.click_enabled, settings.click_price_uzs)
+
+
+async def _sales_closed(call: CallbackQuery, settings: Settings) -> bool:
+    if settings.subscription_enabled:
+        return False
+    await call.answer("Подписка сейчас не продаётся.", show_alert=True)
+    return True
 
 
 @router.message(Command("subscription"), flags=PUBLIC)
@@ -48,6 +57,8 @@ async def cmd_paysupport(message: Message) -> None:
 
 @router.callback_query(PayCb.filter(F.method == "stars"), flags=PUBLIC)
 async def cb_pay_stars(call: CallbackQuery, bot: Bot, settings: Settings) -> None:
+    if await _sales_closed(call, settings):
+        return
     payload = sub.Payload("stars", call.from_user.id, settings.sub_days)
     try:
         await bot.send_invoice(
@@ -70,6 +81,8 @@ async def cb_pay_stars(call: CallbackQuery, bot: Bot, settings: Settings) -> Non
 async def cb_pay_click(call: CallbackQuery, bot: Bot, settings: Settings, secrets: SecretStore) -> None:
     # TODO(Click): заготовка. Перед включением (CLICK_ENABLED=true) получите токен провайдера Click
     # в @BotFather -> Payments, проверьте оплату в тестовом режиме и условия Click для подписок.
+    if await _sales_closed(call, settings):
+        return
     if not settings.click_enabled:
         await call.answer("Этот способ оплаты недоступен.", show_alert=True)
         return
@@ -120,10 +133,8 @@ async def on_successful_payment(
 ) -> None:
     payment = message.successful_payment
     assert payment is not None
-    payload = sub.validate_payment(
-        payment.invoice_payload, payment.currency, payment.total_amount, db_user["tg_id"], settings
-    )
-    if payload is None:
+    payload = sub.Payload.parse(payment.invoice_payload)
+    if payload is None or payload.tg_id != db_user["tg_id"]:
         log.error("Платёж с неожиданными параметрами, charge_id сохранён для проверки")
     is_stars = payment.currency == "XTR"
     is_new = await db.add_payment(

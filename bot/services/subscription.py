@@ -78,6 +78,8 @@ def expected_amount(method: str, settings: Settings) -> tuple[str, int]:
 
 
 def validate_payment(payload_raw: str, currency: str, total_amount: int, from_id: int, settings: Settings) -> Payload | None:
+    if not settings.subscription_enabled:
+        return None
     payload = Payload.parse(payload_raw)
     if payload is None or payload.tg_id != from_id or payload.days != settings.sub_days:
         return None
@@ -101,7 +103,12 @@ async def revoke(db: Database, user: dict[str, Any]) -> None:
 def status_text(user: dict[str, Any], settings: Settings) -> str:
     now = now_utc()
     if user["tg_id"] == settings.admin_id:
-        return "⭐ <b>Подписка</b>\nВы администратор — бот для вас бесплатный."
+        state = "включена" if settings.subscription_enabled else "выключена (SUBSCRIPTION_ENABLED=false)"
+        return f"⭐ <b>Подписка</b>\nВы администратор — бот для вас бесплатный.\nПродажа подписки: {state}."
+    if not settings.subscription_enabled:
+        if is_active(user.get("sub_until"), now):
+            return f"⭐ <b>Доступ открыт</b> до {fmt_until(user['sub_until'])}."
+        return PRIVATE_TEXT
     price = f"{settings.sub_price_xtr} ⭐ за {settings.sub_days} дней"
     if is_active(user.get("sub_until"), now):
         left = days_left(user["sub_until"], now)
@@ -115,6 +122,8 @@ def status_text(user: dict[str, Any], settings: Settings) -> str:
         f"Стоимость: <b>{price}</b>.\nОплата звёздами Telegram прямо в чате."
     )
 
+
+PRIVATE_TEXT = "🔒 Это личный бот. Доступ выдаёт владелец."
 
 PAYWALL_TEXT = (
     "🔒 Для работы с ботом нужна активная подписка.\n"

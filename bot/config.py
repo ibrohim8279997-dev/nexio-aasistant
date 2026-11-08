@@ -50,6 +50,8 @@ class Settings:
     stt_model: str
     db_path: Path
     click_enabled: bool
+    subscription_enabled: bool
+    search_enabled: bool
     click_provider_token: str
     rate_limit_per_min: int
     sub_price_xtr: int
@@ -59,12 +61,10 @@ class Settings:
 
     @property
     def secret_values(self) -> list[str]:
-        """Значения, которые нельзя выводить в логи."""
-        return [
-            v
-            for v in (self.bot_token, self.groq_api_key, self.encryption_key, self.click_provider_token)
-            if v
-        ]
+        """Значения, которые нельзя выводить в логи (включая токены агентов *_TOKEN из окружения)."""
+        values = [self.bot_token, self.groq_api_key, self.encryption_key, self.click_provider_token]
+        values += [v for k, v in os.environ.items() if k.endswith("_TOKEN") and v]
+        return [v for v in values if v]
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -75,14 +75,16 @@ def load_settings(env_file: Path | None = None) -> Settings:
         db_path = BASE_DIR / db_path
 
     settings = Settings(
-        bot_token=_required("BOT_TOKEN"),
+        bot_token=os.getenv("BOT_TOKEN", "").strip(),
         groq_api_key=_required("GROQ_API_KEY"),
         admin_id=_int("ADMIN_ID"),
         encryption_key=_required("ENCRYPTION_KEY"),
-        text_model=_required("TEXT_MODEL"),
-        stt_model=_required("STT_MODEL"),
+        text_model=os.getenv("TEXT_MODEL", "").strip(),
+        stt_model=os.getenv("STT_MODEL", "").strip(),
         db_path=db_path,
         click_enabled=_bool("CLICK_ENABLED", False),
+        subscription_enabled=_bool("SUBSCRIPTION_ENABLED", False),
+        search_enabled=_bool("SEARCH_ENABLED", True),
         click_provider_token=os.getenv("CLICK_PROVIDER_TOKEN", "").strip(),
         rate_limit_per_min=_int("RATE_LIMIT_PER_MIN", 30),
         sub_price_xtr=_int("SUB_PRICE_XTR", 250),

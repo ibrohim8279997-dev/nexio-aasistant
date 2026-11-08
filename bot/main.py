@@ -11,6 +11,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, ErrorEvent
 
+from bot.agents.access import ScopedDB
+from bot.agents.context import AgentContext
+from bot.agents.registry import Registry
 from bot.ai.groq_client import GroqClient
 from bot.config import BASE_DIR, ConfigError, Settings, load_settings
 from bot.crypto import Crypto, SecretStore
@@ -73,13 +76,20 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
 async def run_bot(settings: Settings, crypto: Crypto) -> None:
     db = await Database.connect(settings.db_path)
     await db.migrate()
-    secrets = SecretStore(db, crypto)
-    groq = GroqClient(settings.groq_api_key, settings.text_model, settings.stt_model)
-    rates = RatesService(db)
+    registry = Registry(db)
+    await registry.seed_defaults()
+    agent = await registry.get("kimo")
+    if agent is None:
+        raise ConfigError("В таблице agents нет агента kimo (agents/kimo.json)")
+    scoped = ScopedDB(db, agent.name, agent.allowed_tables)  # права Кимо на таблицы
+    secrets = SecretStore(scoped, crypto)  # type: ignore[arg-type]
+    groq = GroqClient(settings.groq_api_key, agent.text_model or settings.text_model, agent.stt_model or "")
+    rates = RatesService(scoped)  # type: ignore[arg-type]
+    ctx = AgentContext(agent=agent, registry=registry, system_db=db)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings, db=db, secrets=secrets, groq=groq, rates=rates)
-    scheduler = BotScheduler(bot, db, settings)
+    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=groq, rates=rates, agent_ctx=ctx)
+    scheduler = BotScheduler(bot, scoped, settings)  # type: ignore[arg-type]
     try:
         scheduler.start()
         try:

@@ -69,6 +69,8 @@ def make_settings(tmp_path, **over) -> Settings:
         stt_model="whisper-large-v3-turbo",
         db_path=tmp_path / "bot.db",
         click_enabled=False,
+        subscription_enabled=True,
+        search_enabled=True,
         click_provider_token="",
         rate_limit_per_min=100,
         sub_price_xtr=250,
@@ -86,7 +88,7 @@ def groq():
 
 
 @pytest.fixture
-def app(tmp_path, db, groq):
+async def app(tmp_path, db, groq):
     """Диспетчер с фейковыми зависимостями."""
     from bot.handlers import get_routers
     from bot.main import build_dispatcher
@@ -95,8 +97,17 @@ def app(tmp_path, db, groq):
     for router in get_routers():  # роутеры модульные — отцепляем от прошлого теста
         router._parent_router = None
 
+    from bot.agents.access import ScopedDB
+    from bot.agents.context import AgentContext
+    from bot.agents.registry import Registry
+
     settings = make_settings(tmp_path)
-    secrets = SecretStore(db, Crypto(settings.encryption_key))
-    deps = dict(db=db, secrets=secrets, groq=groq, rates=FakeRates(db))
+    registry = Registry(db)
+    await registry.seed_defaults()
+    kimo = await registry.get("kimo")
+    scoped = ScopedDB(db, kimo.name, kimo.allowed_tables)
+    secrets = SecretStore(scoped, Crypto(settings.encryption_key))
+    ctx = AgentContext(agent=kimo, registry=registry, system_db=db)
+    deps = dict(db=scoped, secrets=secrets, groq=groq, rates=FakeRates(scoped), agent_ctx=ctx)
     dp = build_dispatcher(settings, **deps)
     return dp, FakeBot(), settings

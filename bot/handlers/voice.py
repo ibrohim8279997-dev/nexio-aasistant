@@ -14,6 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from bot.ai.actions import ActionParseError, build_messages, parse_actions
+from bot.agents.context import AgentContext
 from bot.ai.groq_client import GroqClient, GroqError
 from bot.db import Database
 from bot.services import assistant
@@ -53,7 +54,7 @@ async def process_text(message: Message, text: str, bot: Bot, groq: GroqClient, 
     await _typing(bot, message.chat.id)
     open_tasks = await open_tasks_for_prompt(deps.db, deps.user["id"])
     try:
-        raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks))
+        raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks, deps.identity))
         actions = parse_actions(raw, now_local().date())
     except GroqError as exc:
         await message.answer(exc.user_message)
@@ -79,6 +80,7 @@ async def on_voice(
     db: Database,
     rates: RatesService,
     db_user: dict[str, Any],
+    agent_ctx: AgentContext,
 ) -> None:
     await state.clear()
     media = message.voice or message.audio
@@ -108,11 +110,17 @@ async def on_voice(
         return
 
     await message.answer(f"🎙 <i>{escape(text[:MAX_TEXT_LEN])}</i>")
-    await process_text(message, text, bot, groq, assistant.AssistantDeps(db=db, user=db_user, rates=rates))
+    await process_text(message, text, bot, groq, assistant.AssistantDeps(db=db, user=db_user, rates=rates, identity=await agent_ctx.identity()))
 
 
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def on_text(
-    message: Message, bot: Bot, groq: GroqClient, db: Database, rates: RatesService, db_user: dict[str, Any]
+    message: Message,
+    bot: Bot,
+    groq: GroqClient,
+    db: Database,
+    rates: RatesService,
+    db_user: dict[str, Any],
+    agent_ctx: AgentContext,
 ) -> None:
-    await process_text(message, message.text or "", bot, groq, assistant.AssistantDeps(db=db, user=db_user, rates=rates))
+    await process_text(message, message.text or "", bot, groq, assistant.AssistantDeps(db=db, user=db_user, rates=rates, identity=await agent_ctx.identity()))

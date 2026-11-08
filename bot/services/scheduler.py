@@ -83,7 +83,9 @@ class BotScheduler:
             log.exception("Ошибка в задаче напоминаний")
 
     async def subscription_reminders(self) -> None:
-        """За 3 дня до конца подписки — одно напоминание с кнопкой оплаты."""
+        """За 3 дня до конца подписки — одно напоминание с кнопкой оплаты (если продажа включена)."""
+        if not self.settings.subscription_enabled:
+            return
         try:
             now = now_utc()
             users = await self.db.users_to_remind_sub(to_db(now), to_db(now + timedelta(days=sub.REMIND_DAYS_BEFORE)))

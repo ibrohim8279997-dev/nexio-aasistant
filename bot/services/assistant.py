@@ -31,6 +31,7 @@ class AssistantDeps:
     db: Database
     user: dict[str, Any]
     rates: RatesService
+    identity: str = ""
 
 
 async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:

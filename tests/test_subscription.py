@@ -59,3 +59,45 @@ def test_validate_payment(tmp_path):
     assert validate_payment(click, "UZS", 4_900_000, 5, s) is None  # Click выключен
     s_on = make_settings(tmp_path, click_enabled=True)
     assert validate_payment(click, "UZS", 4_900_000, 5, s_on)
+
+
+async def test_subscription_disabled_flag(tmp_path, db, groq):
+    from aiogram.types import PreCheckoutQuery, Update
+
+    from bot.agents.access import ScopedDB
+    from bot.agents.context import AgentContext
+    from bot.agents.registry import Registry
+    from bot.crypto import Crypto, SecretStore
+    from bot.handlers import get_routers
+    from bot.keyboards import PayCb
+    from bot.main import build_dispatcher
+    from tests.conftest import ADMIN_ID, FakeRates
+    from tests.fakebot import FakeBot, callback_update, make_user, message_update
+
+    for router in get_routers():
+        router._parent_router = None
+    settings = make_settings(tmp_path, subscription_enabled=False)
+    reg = Registry(db)
+    await reg.seed_defaults()
+    kimo = await reg.get("kimo")
+    scoped = ScopedDB(db, "kimo", kimo.allowed_tables)
+    dp = build_dispatcher(
+        settings, db=scoped, secrets=SecretStore(scoped, Crypto(settings.encryption_key)), groq=groq,
+        rates=FakeRates(scoped), agent_ctx=AgentContext(kimo, reg, db),
+    )
+    bot = FakeBot()
+
+    await dp.feed_update(bot, message_update(55, "купить хлеб"))
+    assert "личный бот" in bot.texts()[-1]
+    assert bot.calls[-1].reply_markup is None  # без кнопок оплаты
+    await dp.feed_update(bot, callback_update(55, PayCb(method="stars").pack()))
+    assert "SendInvoice" not in bot.methods()
+    pcq = PreCheckoutQuery(
+        id="q", from_user=make_user(55), currency="XTR", total_amount=250, invoice_payload=Payload("stars", 55, 30).pack()
+    )
+    await dp.feed_update(bot, Update(update_id=777001, pre_checkout_query=pcq))
+    assert next(c for c in bot.calls if type(c).__name__ == "AnswerPreCheckoutQuery").ok is False
+
+    groq.replies.append('{"actions":[{"type":"reply","text":"ok"}]}')
+    await dp.feed_update(bot, message_update(ADMIN_ID, "привет"))  # владелец работает без оплаты
+    assert bot.texts()[-1] == "ok"

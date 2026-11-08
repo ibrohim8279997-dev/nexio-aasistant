@@ -138,7 +138,9 @@ def parse_actions(raw: str, today: date) -> list[Any]:
     return actions
 
 
-SYSTEM_PROMPT = """Ты — модуль личного ассистента в Telegram. Превращай сообщение пользователя в действия.
+SYSTEM_PROMPT = """{identity}
+
+Ты работаешь через действия: превращай сообщение владельца в действия.
 Отвечай ТОЛЬКО JSON-объектом: {{"actions": [ ... ]}}. Никакого текста вне JSON.
 
 Сейчас: {now}.
@@ -161,14 +163,21 @@ SYSTEM_PROMPT = """Ты — модуль личного ассистента в 
 - В одном сообщении может быть несколько действий.
 - Если сообщение не про задачи, расходы или статистику — верни reply с коротким полезным ответом на языке пользователя (русский или узбекский).
 - Не выдумывай данные. Сомневаешься — reply с уточняющим вопросом.
+- Спрашивают, как тебя зовут или кто ты — reply со своим именем и ролью.
 
 Открытые задачи пользователя:
 {tasks}"""
 
 
-def build_messages(user_text: str, now_text: str, open_tasks: list[str]) -> list[dict[str, str]]:
+DEFAULT_IDENTITY = "Ты — Кимо, личный ассистент владельца в Telegram."
+
+
+def build_messages(
+    user_text: str, now_text: str, open_tasks: list[str], identity: str = ""
+) -> list[dict[str, str]]:
     tasks_block = "\n".join(open_tasks) if open_tasks else "(нет)"
+    system = SYSTEM_PROMPT.format(identity=identity or DEFAULT_IDENTITY, now=now_text, tasks=tasks_block)
     return [
-        {"role": "system", "content": SYSTEM_PROMPT.format(now=now_text, tasks=tasks_block)},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_text},
     ]

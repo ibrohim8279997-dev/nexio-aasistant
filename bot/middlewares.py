@@ -12,7 +12,7 @@ from aiogram.dispatcher.flags import get_flag
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.keyboards import subscription_kb
-from bot.services.subscription import PAYWALL_TEXT, has_access
+from bot.services.subscription import PAYWALL_TEXT, PRIVATE_TEXT, has_access
 from bot.timeutil import now_utc, to_db
 
 log = logging.getLogger(__name__)
@@ -79,14 +79,18 @@ class AccessMiddleware(BaseMiddleware):
         db_user = data.get("db_user")
         if db_user and has_access(db_user["tg_id"], db_user["sub_until"], settings.admin_id):
             return await handler(event, data)
-        markup = subscription_kb(settings.sub_price_xtr, settings.click_enabled, settings.click_price_uzs)
+        if settings.subscription_enabled:
+            text = PAYWALL_TEXT
+            markup = subscription_kb(settings.sub_price_xtr, settings.click_enabled, settings.click_price_uzs)
+        else:  # подписка выключена: бот личный, без кнопок оплаты
+            text, markup = PRIVATE_TEXT, None
         state = data.get("state")
         if state is not None:
             await state.clear()
         if isinstance(event, Message):
-            await event.answer(PAYWALL_TEXT, reply_markup=markup)
+            await event.answer(text, reply_markup=markup)
         elif isinstance(event, CallbackQuery):
             await event.answer()
             if event.bot is not None:
-                await event.bot.send_message(event.from_user.id, PAYWALL_TEXT, reply_markup=markup)
+                await event.bot.send_message(event.from_user.id, text, reply_markup=markup)
         return None
