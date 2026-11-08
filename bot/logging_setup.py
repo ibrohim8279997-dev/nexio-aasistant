@@ -32,13 +32,13 @@ class RedactSecretsFilter(logging.Filter):
         return True
 
 
-def setup_logging(level: str, secrets: list[str], log_dir: Path) -> None:
+def setup_logging(level: str, secrets: list[str], log_dir: Path, name: str = "bot") -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     redact = RedactSecretsFilter(secrets)
 
     stream = logging.StreamHandler()
-    file_handler = RotatingFileHandler(log_dir / "bot.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    file_handler = RotatingFileHandler(log_dir / f"{name}.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     root = logging.getLogger()
     root.handlers.clear()
     for handler in (stream, file_handler):
@@ -46,6 +46,16 @@ def setup_logging(level: str, secrets: list[str], log_dir: Path) -> None:
         handler.addFilter(redact)
         root.addHandler(handler)
     root.setLevel(level)
+
+    # Расход токенов Groq — отдельный файл logs/usage-<агент>.log (у каждого процесса свой)
+    usage = RotatingFileHandler(log_dir / f"usage-{name}.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    usage.setFormatter(formatter)
+    usage.addFilter(redact)
+    usage_logger = logging.getLogger("usage")
+    usage_logger.handlers.clear()
+    usage_logger.addHandler(usage)
+    usage_logger.setLevel(logging.INFO)
+    usage_logger.propagate = False
 
     # Шумные библиотеки
     logging.getLogger("httpx").setLevel(logging.WARNING)

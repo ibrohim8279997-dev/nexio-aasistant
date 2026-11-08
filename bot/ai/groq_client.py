@@ -6,13 +6,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 log = logging.getLogger(__name__)
+usage_log = logging.getLogger("usage")  # отдельный файл logs/usage-<агент>.log, без текстов и секретов
 
 BASE_URL = "https://api.groq.com/openai/v1"
 MAX_AUDIO_BYTES = 25 * 1024 * 1024  # лимит Groq на файл
@@ -20,8 +23,10 @@ MAX_RETRIES = 3
 MAX_RETRY_WAIT = 20.0  # дольше не ждём внутри запроса пользователя
 
 # Лимиты бесплатного тарифа Groq (с запасом не превышаем их сами)
-TEXT_LIMITS = (30, 1000)  # в минуту, в день
+TEXT_LIMITS = (30, 1000)  # запросов в минуту, в день
 STT_LIMITS = (20, 2000)
+TOKEN_LIMITS = (8_000, 200_000)  # токенов в минуту, в день (gpt-oss-120b, free)
+LOW_TOKENS_LEFT = 800  # если по заголовкам Groq осталось меньше — ждём сброса окна
 
 
 class GroqError(Exception):
@@ -54,6 +59,10 @@ class GroqBadResponseError(GroqError):
     def __init__(self, message: str = "", status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+class SttDisabledError(GroqError):
+    user_message = "🎙 Этот агент не принимает голосовые. Напишите текстом."
 
 
 class AudioTooLargeError(GroqError):
@@ -91,6 +100,52 @@ class RateWindow:
         self._day.append(now)
 
 
+class TokenWindow:
+    """Счётчик потраченных токенов: скользящие окна минута/сутки (по usage из ответов)."""
+
+    def __init__(self, per_minute: int, per_day: int) -> None:
+        self.per_minute = per_minute
+        self.per_day = per_day
+        self._events: deque[tuple[float, int]] = deque()
+
+    def add(self, tokens: int, now: float | None = None) -> None:
+        self._events.append((time.monotonic() if now is None else now, max(tokens, 0)))
+
+    def wait_time(self, now: float | None = None) -> tuple[float, bool]:
+        now = time.monotonic() if now is None else now
+        while self._events and now - self._events[0][0] >= 86400:
+            self._events.popleft()
+        day = sum(t for _, t in self._events)
+        if day >= self.per_day:
+            return 86400 - (now - self._events[0][0]), True
+        minute = [(ts, t) for ts, t in self._events if now - ts < 60]
+        if sum(t for _, t in minute) >= self.per_minute:
+            return 60 - (now - minute[0][0]), False
+        return 0.0, False
+
+
+_DURATION_RE = re.compile(r"(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?!s))?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$")
+
+
+def parse_reset(value: str | None) -> float | None:
+    """Заголовок x-ratelimit-reset-* («7.66s», «2m59.5s», «120ms») -> секунды."""
+    if not value:
+        return None
+    m = _DURATION_RE.match(value.strip())
+    if not m or not any(m.groups()):
+        return None
+    h, mnt, sec, ms = (float(g) if g else 0.0 for g in m.groups())
+    return h * 3600 + mnt * 60 + sec + ms / 1000
+
+
+@dataclass
+class ChatResult:
+    content: str
+    usage: dict[str, Any] = field(default_factory=dict)
+    limits: dict[str, str] = field(default_factory=dict)
+    searches: int = 0
+
+
 def _retry_after(response: httpx.Response) -> float | None:
     value = response.headers.get("retry-after")
     if not value:
@@ -112,9 +167,26 @@ class GroqClient:
         )
         self._text_window = RateWindow(*TEXT_LIMITS)
         self._stt_window = RateWindow(*STT_LIMITS)
+        self._tokens = TokenWindow(*TOKEN_LIMITS)
+        self.last_limits: dict[str, str] = {}
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    async def _reserve_tokens(self) -> None:
+        """Перед текстовым запросом: свой учёт токенов и остаток по заголовкам Groq (общий на все процессы)."""
+        wait, daily = self._tokens.wait_time()
+        if daily:
+            raise GroqRateLimitError(wait, daily=True)
+        remaining = self.last_limits.get("x-ratelimit-remaining-tokens")
+        if not wait and remaining and remaining.isdigit() and int(remaining) < LOW_TOKENS_LEFT:
+            wait = parse_reset(self.last_limits.get("x-ratelimit-reset-tokens")) or 0.0
+            self.last_limits.pop("x-ratelimit-remaining-tokens", None)
+        if wait > 0:
+            if wait > MAX_RETRY_WAIT:
+                raise GroqRateLimitError(wait)
+            log.info("Groq: жду %.1f с — лимит токенов в минуту", wait)
+            await asyncio.sleep(wait)
 
     async def _reserve(self, window: RateWindow) -> None:
         wait, daily = window.wait_time()
@@ -155,6 +227,7 @@ class GroqClient:
                 if response.status_code in (401, 403):
                     raise GroqUnavailableError("auth")
                 raise GroqBadResponseError(f"HTTP {response.status_code}", status=response.status_code)
+            self.last_limits = {k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")}
             try:
                 return response.json()
             except ValueError as exc:
@@ -163,34 +236,72 @@ class GroqClient:
 
     async def chat_json(self, messages: list[dict[str, str]], max_tokens: int = 2048) -> str:
         """Возвращает текст ответа модели (ожидается JSON-объект)."""
+        return (await self.chat(messages, json_mode=True, max_tokens=max_tokens)).content
+
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+        search: bool = False,
+        max_tokens: int = 2048,
+        agent: str = "",
+    ) -> ChatResult:
+        """Текстовый запрос. search=True — встроенный browser_search Groq (только gpt-oss)."""
+        if not self.text_model:
+            raise GroqUnavailableError("нет текстовой модели")
         payload: dict[str, Any] = {
             "model": self.text_model,
             "messages": messages,
             "temperature": 0.2,
             "max_completion_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
         }
+        if json_mode and not search:  # browser_search несовместим со structured outputs
+            payload["response_format"] = {"type": "json_object"}
         if "gpt-oss" in self.text_model:
-            payload["reasoning_effort"] = "low"
+            payload["reasoning_effort"] = "low"  # меньше токенов и короче поиск
+        if search:
+            payload["tools"] = [{"type": "browser_search"}]
+            payload["tool_choice"] = "required"
+
+        await self._reserve_tokens()
         try:
             data = await self._post("/chat/completions", self._text_window, json=payload)
         except GroqBadResponseError as exc:
-            if exc.status != 400:
+            if exc.status != 400 or "response_format" not in payload:
                 raise
-            # Модель из .env может не поддерживать JSON-режим — повторяем без него, JSON всё равно проверим
+            # Модель из конфига может не поддерживать JSON-режим — повторяем без него, JSON всё равно проверим
             payload.pop("response_format", None)
             payload.pop("reasoning_effort", None)
             data = await self._post("/chat/completions", self._text_window, json=payload)
         try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
+            message = data["choices"][0]["message"]
+            content = message.get("content")
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise GroqBadResponseError("нет choices") from exc
+        usage = data.get("usage") or {}
+        self._tokens.add(int(usage.get("total_tokens") or 0))
+        searches = len(message.get("executed_tools") or []) if isinstance(message, dict) else 0
+        self._log_usage(agent, search, usage, searches)
         if not content:
             raise GroqBadResponseError("пустой ответ")
-        return str(content)
+        return ChatResult(str(content), usage, dict(self.last_limits), searches)
+
+    def _log_usage(self, agent: str, search: bool, usage: dict[str, Any], searches: int) -> None:
+        usage_log.info(
+            "agent=%s model=%s search=%s searches=%s prompt=%s completion=%s total=%s "
+            "remaining_tokens=%s remaining_requests=%s reset_tokens=%s",
+            agent or "-", self.text_model, search, searches,
+            usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
+            self.last_limits.get("x-ratelimit-remaining-tokens"),
+            self.last_limits.get("x-ratelimit-remaining-requests"),
+            self.last_limits.get("x-ratelimit-reset-tokens"),
+        )
 
     async def transcribe(self, audio: bytes, filename: str = "voice.ogg") -> str:
         """Речь -> текст. Язык определяется автоматически (русский, узбекский и др.)."""
+        if not self.stt_model:
+            raise SttDisabledError("нет модели STT")
         if len(audio) > MAX_AUDIO_BYTES:
             raise AudioTooLargeError("too large")
         data = await self._post(
