@@ -121,7 +121,9 @@ async def app(tmp_path, db, groq):
     kimo = await registry.get("kimo")
     scoped = ScopedDB(db, kimo.name, kimo.allowed_tables)
     secrets = SecretStore(scoped, Crypto(settings.encryption_key))
-    ctx = AgentContext(agent=kimo, registry=registry, system_db=db)
+    from bot.agents.bus import Bus
+
+    ctx = AgentContext(agent=kimo, registry=registry, system_db=db, bus=Bus(db, "kimo"))
     deps = dict(db=scoped, secrets=secrets, groq=groq, rates=FakeRates(scoped), agent_ctx=ctx)
     dp = build_dispatcher(settings, **deps)
     return dp, FakeBot(), settings

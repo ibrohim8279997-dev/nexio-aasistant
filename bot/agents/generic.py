@@ -20,9 +20,10 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import ErrorEvent, Message
 from pydantic import BaseModel, Field, ValidationError
 
-from bot.agents.bus import Bus, BusError, BusWorker, DepthExceeded, chunks
+from bot.agents.bus import BusError, BusWorker, DepthExceeded, chunks
 from bot.agents.cards import CardError, builder_messages, parse_card
 from bot.agents.context import AgentContext
+from bot.agents.registry import TOKEN_RE
 from bot.ai.groq_client import GroqError
 from bot.ai.llm import LLMClient
 from bot.config import Settings
@@ -213,7 +214,10 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
         except GroqError as exc:
             answer = exc.user_message
         for i, part in enumerate(chunks(answer)):
-            await message.answer(part, parse_mode=None, reply_to_message_id=message.message_id if i == 0 else None)
+            if i == 0:
+                await message.reply(part, parse_mode=None)
+            else:
+                await message.answer(part, parse_mode=None)
 
     @router.message(F.voice | F.audio)
     async def on_voice(message: Message, bot: Bot) -> None:
@@ -244,6 +248,13 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
         if not _is_allowed(message, agent) or not _addressed(message, bot_id, username):
             return
         text = message.text or ""
+        if TOKEN_RE.search(text):  # токены не отправляем в LLM и не храним в чате
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            await message.answer("🔒 Токены принимает только Кимо — в личке.", parse_mode=None)
+            return
         if username:
             text = re.sub(rf"@{re.escape(username)}", "", text, flags=re.IGNORECASE).strip()
         if text:

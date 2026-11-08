@@ -6,12 +6,26 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+_FILTERS: list["RedactSecretsFilter"] = []
+
+
+def register_secret(value: str) -> None:
+    """Добавить секрет, появившийся во время работы (например, токен нового агента)."""
+    for flt in _FILTERS:
+        flt.add(value)
+
+
 class RedactSecretsFilter(logging.Filter):
     """Заменяет секреты на *** в тексте сообщения и в traceback."""
 
     def __init__(self, secrets: list[str]) -> None:
         super().__init__()
         self._secrets = [s for s in secrets if s and len(s) >= 8]
+        _FILTERS.append(self)
+
+    def add(self, value: str) -> None:
+        if value and len(value) >= 8 and value not in self._secrets:
+            self._secrets.append(value)
 
     def _redact(self, text: str) -> str:
         for secret in self._secrets:

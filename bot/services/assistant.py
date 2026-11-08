@@ -3,19 +3,34 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from html import escape
 from typing import Any
 
 from aiogram.types import InlineKeyboardMarkup
 
-from bot.ai.actions import AddExpense, AddTask, CompleteTask, ListTasks, Reply, ShowStats
+from bot.ai.actions import (
+    AddExpense,
+    AddTask,
+    Clarify,
+    CompleteTask,
+    CreateAgent,
+    Delegate,
+    ListReminders,
+    ListTasks,
+    Reply,
+    ShowStats,
+)
 from bot.db import Database
-from bot.keyboards import stats_menu, task_list_kb
+from bot.keyboards import agent_card_kb, stats_menu, task_list_kb
 from bot.services import expenses as expenses_service
 from bot.services import tasks as tasks_service
 from bot.services import tracker
+from bot.agents import builder_flow
+from bot.agents.bus import BusError, DepthExceeded
+from bot.agents.cards import card_text
 from bot.services.rates import RatesService
-from bot.timeutil import now_local, to_db
+from bot.timeutil import TZ, from_db, now_local, now_utc, to_db
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +47,11 @@ class AssistantDeps:
     user: dict[str, Any]
     rates: RatesService
     identity: str = ""
+    ctx: Any = None  # AgentContext — для передачи задач другим агентам
+    chat_id: int | None = None
+    reply_to: int | None = None
+    is_group: bool = False
+    is_owner: bool = False
 
 
 async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
@@ -41,6 +61,8 @@ async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
             answers.append(await _execute_one(action, deps))
         except (tasks_service.TaskInputError, expenses_service.ExpenseInputError) as exc:
             answers.append(Answer(f"⚠️ {exc}"))
+        except builder_flow.FlowError as exc:
+            answers.append(Answer(f"⚠️ {escape(str(exc))}"))
     return answers
 
 
@@ -81,5 +103,63 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
     if isinstance(action, Reply):
         return Answer(escape(action.text))
 
+    if isinstance(action, ListReminders):
+        return Answer(await _reminders_text(db, user_id))
+
+    if isinstance(action, Clarify):
+        return Answer(f"❓ {escape(action.question)}")
+
+    if isinstance(action, Delegate):
+        return await _delegate(action, deps)
+
+    if isinstance(action, CreateAgent):
+        return await _create_agent(action, deps)
+
     log.warning("Неизвестное действие: %s", type(action).__name__)
     return Answer("🤔 Не понял запрос.")
+
+
+async def _reminders_text(db: Database, user_id: int) -> str:
+    now = now_utc()
+    rows = await db.upcoming_reminders(user_id, to_db(now), to_db(now + timedelta(days=7)))
+    if not rows:
+        return "⏰ Ближайших напоминаний нет."
+    today = now_local().date()
+    lines = ["⏰ <b>Ближайшие напоминания</b>"]
+    for task in rows:
+        due = from_db(task["due_at"])
+        if due:
+            lines.append(f"• {tasks_service.human_due(due.astimezone(TZ), True, today)} — {escape(task['text'])}")
+    return "\n".join(lines)
+
+
+async def _delegate(action: Delegate, deps: AssistantDeps) -> Answer:
+    ctx = deps.ctx
+    if ctx is None or ctx.bus is None:
+        return Answer("Передача задач другим агентам здесь недоступна.")
+    target = await ctx.registry.get(action.agent)
+    if target is None or not target.enabled or target.name == ctx.agent.name:
+        return Answer("❓ Не нашёл подходящего агента. Кому передать задачу?")
+    try:
+        if deps.is_group and deps.chat_id:
+            # Ответит сам агент — от своего имени, реплаем на исходное сообщение
+            await ctx.bus.send(
+                target.name, {"type": "ask", "text": action.task}, depth=1, chat_id=deps.chat_id, reply_to=deps.reply_to
+            )
+            return Answer(f"👉 Задачу взял(а) <b>{escape(target.display_name)}</b>.")
+        result = await ctx.bus.ask(target.name, action.task, depth=1)
+    except DepthExceeded as exc:
+        return Answer(escape(str(exc)))
+    except BusError as exc:
+        return Answer(f"⚠️ {escape(target.display_name)}: {escape(str(exc))}")
+    return Answer(f"<b>{escape(target.display_name)}:</b>\n{escape(result)}")
+
+
+async def _create_agent(action: CreateAgent, deps: AssistantDeps) -> Answer:
+    ctx = deps.ctx
+    if ctx is None or ctx.bus is None or not deps.is_owner:
+        return Answer("Создавать агентов может только владелец.")
+    card = await builder_flow.request_card(ctx, action.description)
+    card = await builder_flow.save_draft(ctx, card)
+    text = card_text(card) + "\n\nЗапускаю этого агента?"
+    return Answer(text, agent_card_kb(card.name, bool(card.suggested_tables or card.suggested_commands)))

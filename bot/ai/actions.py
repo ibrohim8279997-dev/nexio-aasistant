@@ -87,7 +87,35 @@ class Reply(_Base):
     text: str = Field(min_length=1, max_length=3000)
 
 
-Action = Annotated[Union[AddTask, AddExpense, CompleteTask, ListTasks, ShowStats, Reply], Field(discriminator="type")]
+class ListReminders(_Base):
+    type: Literal["list_reminders"]
+
+
+class Delegate(_Base):
+    """Передать задачу другому агенту (диспетчер)."""
+
+    type: Literal["delegate"]
+    agent: str = Field(min_length=1, max_length=32)
+    task: str = Field(min_length=1, max_length=1500)
+
+
+class Clarify(_Base):
+    """Неясно, чья задача, — один короткий вопрос владельцу."""
+
+    type: Literal["clarify"]
+    question: str = Field(min_length=1, max_length=300)
+
+
+class CreateAgent(_Base):
+    type: Literal["create_agent"]
+    description: str = Field(min_length=10, max_length=3000)
+
+
+Action = Annotated[
+    Union[AddTask, AddExpense, CompleteTask, ListTasks, ShowStats, Reply, ListReminders, Delegate, Clarify, CreateAgent],
+    Field(discriminator="type"),
+]
+DISPATCH_TYPES = (Delegate, CreateAgent)
 _ACTION_ADAPTER: TypeAdapter[Any] = TypeAdapter(Action)
 
 
@@ -107,8 +135,12 @@ def _extract_json(raw: str) -> Any:
         raise ActionParseError("некорректный JSON") from exc
 
 
-def parse_actions(raw: str, today: date) -> list[Any]:
-    """Строка от модели -> список проверенных действий. Невалидные действия отбрасываются."""
+def parse_actions(raw: str, today: date, agents: set[str] | None = None) -> list[Any]:
+    """Строка от модели -> список проверенных действий. Невалидные действия отбрасываются.
+
+    agents — системные имена агентов, которым можно передавать задачи. None — передача запрещена
+    (например, запрос пришёл из шины от другого агента).
+    """
     data = _extract_json(raw)
     if isinstance(data, dict) and "actions" in data:
         items = data["actions"]
@@ -132,6 +164,10 @@ def parse_actions(raw: str, today: date) -> list[Any]:
                 continue
         if isinstance(action, AddExpense) and action.amount > MAX_AMOUNT[action.currency]:
             continue
+        if isinstance(action, Delegate) and (agents is None or action.agent not in agents):
+            continue
+        if isinstance(action, CreateAgent) and agents is None:
+            continue
         actions.append(action)
     if not actions and items:
         raise ActionParseError("ни одно действие не прошло проверку")
@@ -152,6 +188,10 @@ SYSTEM_PROMPT = """{identity}
 4. {{"type":"list_tasks","day":"today"|"tomorrow"}}
 5. {{"type":"show_stats","topic":"expenses"|"tasks","period":"day"|"week"|"month"}}
 6. {{"type":"reply","text":"<короткий ответ>"}}
+7. {{"type":"list_reminders"}} — ближайшие напоминания (задачи со временем)
+8. {{"type":"delegate","agent":"<системное имя агента>","task":"<полная формулировка задачи>"}}
+9. {{"type":"clarify","question":"<один короткий вопрос>"}}
+10. {{"type":"create_agent","description":"<полное описание нужного агента: задачи, что можно, что нельзя, конфиденциальность>"}}
 
 Правила:
 - Даты «сегодня», «завтра», «послезавтра», «в пятницу», «через 2 часа», «bugun», «ertaga» переводи в date и time по текущему времени Ташкента.
@@ -164,6 +204,10 @@ SYSTEM_PROMPT = """{identity}
 - Если сообщение не про задачи, расходы или статистику — верни reply с коротким полезным ответом на языке пользователя (русский или узбекский).
 - Не выдумывай данные. Сомневаешься — reply с уточняющим вопросом.
 - Спрашивают, как тебя зовут или кто ты — reply со своим именем и ролью.
+- Ты диспетчер. Расходы, задачи и напоминания делаешь сам. Остальное передавай агенту, чья роль подходит
+  (delegate, только агентам из списка «Другие агенты»). Вопросы, поиск информации, тексты — универсальному помощнику.
+- Просят создать нового агента — create_agent с описанием словами владельца, ничего не добавляй.
+- Неясно, чья это задача, — clarify с одним коротким вопросом. Не передавай задачу наугад.
 
 Открытые задачи пользователя:
 {tasks}"""

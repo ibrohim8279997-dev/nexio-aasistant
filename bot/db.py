@@ -350,6 +350,13 @@ class Database:
             (now, not_before),
         )
 
+    async def upcoming_reminders(self, user_id: int, start: str, end: str) -> list[dict[str, Any]]:
+        return await self._all(
+            """SELECT * FROM tasks WHERE user_id = ? AND has_time = 1 AND done_at IS NULL
+               AND due_at >= ? AND due_at < ? ORDER BY due_at LIMIT 30""",
+            (user_id, start, end),
+        )
+
     async def mark_reminded(self, task_id: int) -> None:
         await self._write("UPDATE tasks SET reminded = 1 WHERE id = ?", (task_id,))
 

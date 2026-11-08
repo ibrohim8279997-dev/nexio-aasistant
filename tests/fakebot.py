@@ -69,3 +69,15 @@ def callback_update(uid: int, data: str) -> Update:
     msg = Message(message_id=_next_id(), date=datetime.now(timezone.utc), chat=Chat(id=uid, type="private"), text="x")
     call = CallbackQuery(id=str(_next_id()), from_user=make_user(uid), chat_instance="ci", data=data, message=msg)
     return Update(update_id=_next_id(), callback_query=call)
+
+
+def group_message_update(uid: int, text: str | None = None, chat_id: int = -100500, **extra: Any) -> Update:
+    msg = Message(
+        message_id=_next_id(),
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=chat_id, type="supergroup", title="Агенты"),
+        from_user=make_user(uid),
+        text=text,
+        **extra,
+    )
+    return Update(update_id=_next_id(), message=msg)

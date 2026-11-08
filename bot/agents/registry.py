@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 AGENTS_DIR = BASE_DIR / "agents"
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b")  # формат токена BotFather
 
 
 @dataclass

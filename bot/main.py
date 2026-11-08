@@ -17,7 +17,7 @@ from bot.ai.llm import LLMClient
 from bot.config import Settings
 from bot.crypto import Crypto, SecretStore
 from bot.handlers import get_routers
-from bot.middlewares import AccessMiddleware, ThrottlingMiddleware, UserMiddleware
+from bot.middlewares import AccessMiddleware, GroupGuardMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.services.rates import RatesService
 from bot.services.scheduler import BotScheduler
 
@@ -31,6 +31,7 @@ COMMANDS = [
     BotCommand(command="spend", description="Добавить расход"),
     BotCommand(command="subscription", description="Подписка"),
     BotCommand(command="paysupport", description="Помощь с оплатой"),
+    BotCommand(command="agents", description="Агенты (для владельца)"),
     BotCommand(command="help", description="Помощь"),
 ]
 
@@ -41,6 +42,9 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
     dp["settings"] = settings
     dp.workflow_data.update(deps)
 
+    group_guard = GroupGuardMiddleware()  # первым: в группе — только владелец, токены удаляются
+    dp.message.outer_middleware(group_guard)
+    dp.callback_query.outer_middleware(group_guard)
     throttling = ThrottlingMiddleware(settings.rate_limit_per_min, settings.admin_id)
     dp.message.outer_middleware(throttling)
     dp.callback_query.outer_middleware(throttling)

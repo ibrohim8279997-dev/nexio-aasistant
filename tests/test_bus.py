@@ -45,7 +45,7 @@ async def test_worker_replies_in_chat_from_own_bot(db):
     task = await db.queue_get(task_id)
     assert task["status"] == "done" and task["result"] == "ответ ассистента"
     sent = bot.calls[-1]
-    assert sent.chat_id == -100 and sent.reply_to_message_id == 42 and sent.text == "ответ ассистента"
+    assert sent.chat_id == -100 and sent.reply_parameters.message_id == 42 and sent.text == "ответ ассистента"
 
 
 async def test_worker_notifies_owner_on_depth_stop(db):

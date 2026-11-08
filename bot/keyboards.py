@@ -179,3 +179,17 @@ def reminder_kb(task_id: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+class AgentCb(CallbackData, prefix="ag"):
+    action: str  # yes_sugg | yes_none | cancel
+    name: str
+
+
+def agent_card_kb(name: str, has_suggestions: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_suggestions:
+        rows.append([btn("Да, с предложенными правами", AgentCb(action="yes_sugg", name=name), "success", "✅")])
+    rows.append([btn("Да, без доступа к таблицам", AgentCb(action="yes_none", name=name), "success", "✅")])
+    rows.append([btn("Отмена", AgentCb(action="cancel", name=name), "danger", "✖️")])
+    return _kb(rows)

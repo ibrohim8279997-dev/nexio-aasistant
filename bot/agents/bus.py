@@ -17,6 +17,7 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import ReplyParameters
 
 from bot.agents.registry import NAME_RE
 from bot.db import Database
@@ -110,7 +111,13 @@ class Bus:
 
     async def ask(self, to_agent: str, text: str, *, depth: int = 1, timeout: float = ASK_TIMEOUT) -> str:
         """Спросить другого агента и дождаться ответа (ответ в чат не отправляется)."""
-        task_id = await self.send(to_agent, {"type": "ask", "text": text, "reply": False}, depth=depth)
+        return await self.request(to_agent, {"type": "ask", "text": text}, depth=depth, timeout=timeout)
+
+    async def request(
+        self, to_agent: str, payload: dict[str, Any], *, depth: int = 1, timeout: float = ASK_TIMEOUT
+    ) -> str:
+        """Задание с ожиданием результата: ping, ask, build_card ..."""
+        task_id = await self.send(to_agent, {**payload, "reply": False}, depth=depth)
         task = await self.wait_result(task_id, timeout)
         if task["status"] == "failed":
             raise BusError(task["result"] or "Задание не выполнено")
@@ -181,11 +188,8 @@ class BusWorker:
     async def reply(self, chat_id: int, reply_to: int | None, text: str) -> None:
         for i, part in enumerate(chunks(text)):
             try:
-                await self.bot.send_message(
-                    chat_id, part, parse_mode=None,
-                    reply_to_message_id=reply_to if i == 0 else None,
-                    allow_sending_without_reply=True,
-                )
+                params = ReplyParameters(message_id=reply_to, allow_sending_without_reply=True) if reply_to and i == 0 else None
+                await self.bot.send_message(chat_id, part, parse_mode=None, reply_parameters=params)
             except TelegramAPIError as exc:
                 log.warning("Шина: не удалось ответить в чат: %s", type(exc).__name__)
                 return
