@@ -4,9 +4,13 @@
 """
 from __future__ import annotations
 
+import asyncio
+import fcntl
+import json
 import logging
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +82,51 @@ MIGRATIONS: list[str] = [
         fetched_at TEXT NOT NULL
     );
     """,
+    # 2: мультиагентность — реестр агентов и шина заданий
+    """
+    CREATE TABLE IF NOT EXISTS agents (
+        name             TEXT PRIMARY KEY,
+        role             TEXT NOT NULL,
+        bot_username     TEXT,
+        system_prompt    TEXT NOT NULL DEFAULT '',
+        models           TEXT NOT NULL DEFAULT '{}',
+        allowed_tables   TEXT NOT NULL DEFAULT '[]',
+        allowed_commands TEXT NOT NULL DEFAULT '[]',
+        deny_rules       TEXT NOT NULL DEFAULT '[]',
+        enabled          INTEGER NOT NULL DEFAULT 0,
+        config           TEXT NOT NULL DEFAULT '{}',
+        created_at       TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS secrets (
+        name            TEXT PRIMARY KEY,
+        encrypted_value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tasks_queue (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_agent          TEXT NOT NULL,
+        to_agent            TEXT NOT NULL,
+        payload             TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'taken', 'done', 'failed')),
+        result              TEXT,
+        chat_id             INTEGER,
+        reply_to_message_id INTEGER,
+        depth               INTEGER NOT NULL DEFAULT 0,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_queue_to_status ON tasks_queue(to_agent, status, id);
+    """,
 ]
+
+# Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
+DOWN_MIGRATIONS: dict[int, str] = {
+    2: "DROP TABLE IF EXISTS tasks_queue; DROP TABLE IF EXISTS agents;",
+}
+
+AGENT_JSON_FIELDS = ("models", "allowed_tables", "allowed_commands", "deny_rules", "config")
+AGENT_COLUMNS = ("role", "bot_username", "system_prompt", "enabled", *AGENT_JSON_FIELDS)
 
 
 def _restrict_permissions(path: Path) -> None:
@@ -119,17 +167,61 @@ class Database:
         row = await self._one("PRAGMA user_version")
         return int(row["user_version"]) if row else 0
 
+    def backup_dir(self) -> Path:
+        return self.path.parent / "backups"
+
+    async def backup(self, label: str = "manual") -> Path:
+        """Согласованная копия БД (VACUUM INTO), безопасно при работающих агентах."""
+        target_dir = self.backup_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = target_dir / f"{self.path.stem}-{stamp}-{label}.db"
+        n = 1
+        while target.exists():  # VACUUM INTO не пишет в существующий файл
+            n += 1
+            target = target_dir / f"{self.path.stem}-{stamp}-{label}-{n}.db"
+        await self.conn.commit()
+        await self.conn.execute("VACUUM INTO ?", (str(target),))
+        _restrict_permissions(target)
+        log.info("Бэкап БД: %s", target.name)
+        return target
+
     async def migrate(self) -> None:
+        """Применяет новые миграции под файловой блокировкой (агенты стартуют параллельно).
+        Перед миграцией существующей БД делается бэкап."""
+        lock_fd = os.open(f"{self.path}.migrate.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            await asyncio.to_thread(fcntl.flock, lock_fd, fcntl.LOCK_EX)
+            version = await self.schema_version()
+            if version >= len(MIGRATIONS):
+                return
+            if version > 0:
+                await self.backup(f"before-v{version + 1}")
+            for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
+                try:
+                    await self.conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {number};\nCOMMIT;")
+                except Exception:
+                    await self.conn.rollback()
+                    log.error("Миграция %s не применилась", number)
+                    raise
+                log.info("Применена миграция БД №%s", number)
+            _restrict_permissions(self.path)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    async def downgrade(self, target: int) -> None:
+        """Откат схемы до версии target (с бэкапом перед откатом)."""
         version = await self.schema_version()
-        for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
-            try:
-                await self.conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {number};\nCOMMIT;")
-            except Exception:
-                await self.conn.rollback()
-                log.error("Миграция %s не применилась", number)
-                raise
-            log.info("Применена миграция БД №%s", number)
-        _restrict_permissions(self.path)
+        if target >= version:
+            return
+        await self.backup(f"before-downgrade-v{target}")
+        for number in range(version, target, -1):
+            script = DOWN_MIGRATIONS.get(number)
+            if script is None:
+                raise RuntimeError(f"Для миграции {number} нет отката — восстановите БД из бэкапа")
+            await self.conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {number - 1};\nCOMMIT;")
+            log.info("Откачена миграция БД №%s", number)
 
     # ---------- помощники ----------
 
@@ -380,3 +472,133 @@ class Database:
 
     async def last_rate(self) -> dict[str, Any] | None:
         return await self._one("SELECT * FROM rates_cache ORDER BY fetched_at DESC LIMIT 1")
+
+    # ---------- агенты (реестр) ----------
+
+    @staticmethod
+    def _agent_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        for field in AGENT_JSON_FIELDS:
+            try:
+                row[field] = json.loads(row[field] or ("{}" if field in ("models", "config") else "[]"))
+            except (TypeError, ValueError):
+                row[field] = {} if field in ("models", "config") else []
+        row["enabled"] = bool(row["enabled"])
+        return row
+
+    async def insert_agent(self, agent: dict[str, Any], now: str, replace: bool = False) -> bool:
+        """Добавить агента. replace=False — не трогать существующего (seed). True, если запись изменилась."""
+        values = [agent["name"], agent["role"], agent.get("bot_username"), agent.get("system_prompt", ""),
+                  json.dumps(agent.get("models", {}), ensure_ascii=False),
+                  json.dumps(agent.get("allowed_tables", []), ensure_ascii=False),
+                  json.dumps(agent.get("allowed_commands", []), ensure_ascii=False),
+                  json.dumps(agent.get("deny_rules", []), ensure_ascii=False),
+                  int(bool(agent.get("enabled", False))),
+                  json.dumps(agent.get("config", {}), ensure_ascii=False), now]
+        verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
+        cur = await self._write(
+            f"""{verb} INTO agents (name, role, bot_username, system_prompt, models, allowed_tables,
+                allowed_commands, deny_rules, enabled, config, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tuple(values),
+        )
+        return cur.rowcount > 0
+
+    async def get_agent(self, name: str) -> dict[str, Any] | None:
+        return self._agent_row(await self._one("SELECT * FROM agents WHERE name = ?", (name,)))
+
+    async def list_agents(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM agents" + (" WHERE enabled = 1" if enabled_only else "") + " ORDER BY created_at, name"
+        return [self._agent_row(r) for r in await self._all(sql)]  # type: ignore[misc]
+
+    async def update_agent(self, name: str, **fields: Any) -> bool:
+        unknown = set(fields) - set(AGENT_COLUMNS)
+        if unknown:
+            raise ValueError(f"Неизвестные поля агента: {sorted(unknown)}")
+        if not fields:
+            return False
+        sets, params = [], []
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")  # имена колонок только из белого списка AGENT_COLUMNS
+            if key in AGENT_JSON_FIELDS:
+                value = json.dumps(value, ensure_ascii=False)
+            elif key == "enabled":
+                value = int(bool(value))
+            params.append(value)
+        cur = await self._write(f"UPDATE agents SET {', '.join(sets)} WHERE name = ?", (*params, name))
+        return cur.rowcount > 0
+
+    async def delete_agent(self, name: str) -> bool:
+        cur = await self._write("DELETE FROM agents WHERE name = ?", (name,))
+        return cur.rowcount > 0
+
+    # ---------- шина заданий ----------
+
+    async def queue_insert(
+        self,
+        from_agent: str,
+        to_agent: str,
+        payload: dict[str, Any],
+        now: str,
+        *,
+        chat_id: int | None = None,
+        reply_to_message_id: int | None = None,
+        depth: int = 0,
+        status: str = "new",
+        result: str | None = None,
+    ) -> int:
+        cur = await self._write(
+            """INSERT INTO tasks_queue (from_agent, to_agent, payload, status, result, chat_id,
+               reply_to_message_id, depth, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (from_agent, to_agent, json.dumps(payload, ensure_ascii=False), status, result, chat_id,
+             reply_to_message_id, depth, now, now),
+        )
+        return int(cur.lastrowid)
+
+    async def queue_claim(self, to_agent: str, now: str) -> dict[str, Any] | None:
+        """Атомарно забрать самое старое новое задание агента. Два процесса не получат одно задание."""
+        for _ in range(5):
+            row = await self._one(
+                "SELECT id FROM tasks_queue WHERE to_agent = ? AND status = 'new' ORDER BY id LIMIT 1", (to_agent,)
+            )
+            if row is None:
+                return None
+            cur = await self._write(
+                "UPDATE tasks_queue SET status = 'taken', updated_at = ? WHERE id = ? AND status = 'new'",
+                (now, row["id"]),
+            )
+            if cur.rowcount == 1:
+                return await self.queue_get(row["id"])
+        return None
+
+    async def queue_get(self, task_id: int) -> dict[str, Any] | None:
+        row = await self._one("SELECT * FROM tasks_queue WHERE id = ?", (task_id,))
+        if row:
+            try:
+                row["payload"] = json.loads(row["payload"])
+            except ValueError:
+                row["payload"] = {}
+        return row
+
+    async def queue_finish(self, task_id: int, status: str, result: str | None, now: str) -> None:
+        if status not in ("done", "failed"):
+            raise ValueError("status: done | failed")
+        await self._write(
+            "UPDATE tasks_queue SET status = ?, result = ?, updated_at = ? WHERE id = ?", (status, result, now, task_id)
+        )
+
+    async def queue_fail_interrupted(self, to_agent: str, now: str) -> int:
+        """Задания, взятые агентом до перезапуска, помечаются failed (не повторяем: возможны дубли действий)."""
+        cur = await self._write(
+            "UPDATE tasks_queue SET status = 'failed', result = 'Прервано перезапуском агента', updated_at = ? "
+            "WHERE to_agent = ? AND status = 'taken'",
+            (now, to_agent),
+        )
+        return cur.rowcount
+
+    async def queue_cleanup(self, before: str) -> int:
+        cur = await self._write(
+            "DELETE FROM tasks_queue WHERE status IN ('done', 'failed') AND updated_at < ?", (before,)
+        )
+        return cur.rowcount
