@@ -1,4 +1,4 @@
-"""Точка входа: python -m bot.main"""
+"""Кимо: диспетчер aiogram и запуск процесса. Точка входа агентов — run_agent.py."""
 from __future__ import annotations
 
 import asyncio
@@ -7,19 +7,16 @@ import sys
 from typing import Any
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, ErrorEvent
 
 from bot.agents.access import ScopedDB
+from bot.agents.bus import BusWorker
 from bot.agents.context import AgentContext
-from bot.agents.registry import Registry
-from bot.ai.groq_client import GroqClient
-from bot.config import BASE_DIR, ConfigError, Settings, load_settings
+from bot.agents.kimo import KimoBusHandler
+from bot.ai.llm import LLMClient
+from bot.config import Settings
 from bot.crypto import Crypto, SecretStore
-from bot.db import Database
 from bot.handlers import get_routers
-from bot.logging_setup import setup_logging
 from bot.middlewares import AccessMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.services.rates import RatesService
 from bot.services.scheduler import BotScheduler
@@ -73,55 +70,45 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
     return dp
 
 
-async def run_bot(settings: Settings, crypto: Crypto) -> None:
-    db = await Database.connect(settings.db_path)
-    await db.migrate()
-    registry = Registry(db)
-    await registry.seed_defaults()
-    agent = await registry.get("kimo")
-    if agent is None:
-        raise ConfigError("В таблице agents нет агента kimo (agents/kimo.json)")
-    scoped = ScopedDB(db, agent.name, agent.allowed_tables)  # права Кимо на таблицы
+async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: Bot, crypto: Crypto) -> None:
+    """Процесс Кимо: прежний бот (задачи, расходы, статистика, оплата) + шина заданий + диспетчер."""
+    agent = ctx.agent
+    scoped = ScopedDB(ctx.system_db, agent.name, agent.allowed_tables)  # права Кимо на таблицы
     secrets = SecretStore(scoped, crypto)  # type: ignore[arg-type]
-    groq = GroqClient(settings.groq_api_key, agent.text_model or settings.text_model, agent.stt_model or "")
     rates = RatesService(scoped)  # type: ignore[arg-type]
-    ctx = AgentContext(agent=agent, registry=registry, system_db=db)
 
-    bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=groq, rates=rates, agent_ctx=ctx)
-    scheduler = BotScheduler(bot, scoped, settings)  # type: ignore[arg-type]
+    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx)
+    scheduler = BotScheduler(bot, scoped, settings, system_db=ctx.system_db)  # type: ignore[arg-type]
+    worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings), bot, settings.admin_id)
+    worker_task: asyncio.Task[None] | None = None
     try:
         scheduler.start()
         try:
             await bot.set_my_commands(COMMANDS)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось установить команды: %s", type(exc).__name__)
-        log.info("Бот запущен (long polling)")
+        try:
+            me = await bot.get_me()
+            if me.username != agent.bot_username:
+                await ctx.system_db.update_agent(agent.name, bot_username=me.username)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось получить данные бота: %s", type(exc).__name__)
+        worker_task = asyncio.create_task(worker.run())
+        log.info("Кимо запущен (long polling)")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        worker.stop()
+        if worker_task:
+            await asyncio.gather(worker_task, return_exceptions=True)
         scheduler.shutdown()
-        await bot.session.close()
-        await groq.close()
         await rates.close()
-        await db.close()
-        log.info("Бот остановлен")
 
 
 def main() -> None:
-    try:
-        settings = load_settings()
-        crypto = Crypto(settings.encryption_key)
-    except ConfigError as exc:
-        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
-        sys.exit(2)
-    setup_logging(settings.log_level, settings.secret_values, BASE_DIR / "logs")
-    try:
-        asyncio.run(run_bot(settings, crypto))
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    except Exception as exc:  # noqa: BLE001 — логируем через фильтр секретов, run.sh перезапустит
-        log.critical("Бот упал: %s", type(exc).__name__, exc_info=exc)
-        sys.exit(1)
+    """Совместимость: python -m bot.main == python run_agent.py kimo."""
+    from bot.runner import main as runner_main
+
+    sys.exit(runner_main(["kimo"]))
 
 
 if __name__ == "__main__":

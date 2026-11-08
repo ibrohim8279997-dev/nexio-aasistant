@@ -24,10 +24,11 @@ STALE_AFTER = timedelta(hours=12)  # если бот был выключен д�
 
 
 class BotScheduler:
-    def __init__(self, bot: Bot, db: Database, settings: Settings) -> None:
+    def __init__(self, bot: Bot, db: Database, settings: Settings, system_db: Database | None = None) -> None:
         self.bot = bot
         self.db = db
         self.settings = settings
+        self.system_db = system_db  # для служебной очистки очереди заданий
         self.scheduler = AsyncIOScheduler(timezone=TZ)
 
     def start(self) -> None:
@@ -37,6 +38,8 @@ class BotScheduler:
             self.subscription_reminders, "interval", hours=1, id="sub_reminders",
             next_run_time=datetime.now(TZ) + timedelta(seconds=30), **common,
         )
+        if self.system_db is not None:
+            self.scheduler.add_job(self.cleanup_queue, "interval", hours=24, id="queue_cleanup", **common)
         self.scheduler.start()
         log.info("Планировщик запущен")
 
@@ -106,3 +109,14 @@ class BotScheduler:
                 await self.db.mark_sub_notified(user["id"])
         except Exception:  # noqa: BLE001
             log.exception("Ошибка в задаче напоминаний о подписке")
+
+    async def cleanup_queue(self) -> None:
+        """Удалить выполненные/упавшие задания шины старше 7 дней."""
+        if self.system_db is None:
+            return
+        try:
+            removed = await self.system_db.queue_cleanup(to_db(now_utc() - timedelta(days=7)))
+            if removed:
+                log.info("Очередь заданий: удалено старых записей: %s", removed)
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка очистки очереди заданий")

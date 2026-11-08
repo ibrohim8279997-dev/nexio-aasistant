@@ -1,66 +1,81 @@
 #!/usr/bin/env bash
-# Запуск бота с автоперезапуском в tmux (или screen).
-#   ./run.sh          — запустить в фоне (tmux/screen)
-#   ./run.sh fg       — запустить в текущем терминале
-#   ./run.sh stop | restart | attach | status | logs
+# Запуск агентов с автоперезапуском. Каждый агент — отдельный процесс в своём окне tmux (сессия agents).
+#   ./run.sh                    — поднять всех включённых агентов (то же, что ./run_all.sh)
+#   ./run.sh start <агент>      — запустить агента в отдельном окне tmux
+#   ./run.sh fg <агент>         — запустить в текущем терминале (перезапуск при падении)
+#   ./run.sh stop <агент> | restart <агент> | logs <агент>
+#   ./run.sh status | attach
 set -u
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
 
-SESSION="${BOT_SESSION:-tgbot}"
+SESSION="${BOT_SESSION:-agents}"
 VENV="${VENV:-.venv}"
 RESTART_DELAY="${RESTART_DELAY:-5}"
 SELF="$(readlink -f "$0")"
 
-loop() {
+valid_name() { [[ "${1:-}" =~ ^[a-z][a-z0-9_]{2,31}$ ]] || { echo "Некорректное имя агента: '${1:-}'"; exit 1; }; }
+
+activate() {
   if [ ! -f "$VENV/bin/activate" ]; then
     echo "Не найдено виртуальное окружение $VENV. См. README, шаг установки."
     exit 1
   fi
   # shellcheck disable=SC1091
   . "$VENV/bin/activate"
+}
+
+loop() {
+  local name="$1"
+  activate
   mkdir -p logs data
-  trap 'echo "Остановлено."; exit 0' INT TERM
+  trap 'echo "Агент $name остановлен."; exit 0' INT TERM
   while true; do
-    echo "[$(date '+%F %T')] Запуск бота"
-    python -m bot.main
+    echo "[$(date '+%F %T')] Запуск агента $name"
+    python run_agent.py "$name"
     code=$?
-    if [ "$code" -eq 2 ]; then
-      echo "Ошибка конфигурации (.env). Исправьте и запустите снова."
-      exit 2
-    fi
-    echo "[$(date '+%F %T')] Бот завершился с кодом $code. Перезапуск через ${RESTART_DELAY} с."
+    case "$code" in
+      0) echo "[$(date '+%F %T')] Агент $name завершился штатно." ;;
+      2) echo "Ошибка конфигурации агента $name (.env / токен). Перезапуск отменён."; exit 2 ;;
+      3) echo "Агент $name выключен или не найден. Перезапуск отменён."; exit 3 ;;
+      *) echo "[$(date '+%F %T')] Агент $name упал (код $code)." ;;
+    esac
+    echo "Перезапуск через ${RESTART_DELAY} с."
     sleep "$RESTART_DELAY"
   done
 }
 
-is_running() {
-  if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$SESSION" 2>/dev/null; then return 0; fi
-  if command -v screen >/dev/null 2>&1 && screen -list 2>/dev/null | grep -q "[.]$SESSION[[:space:]]"; then return 0; fi
-  return 1
+need_tmux() { command -v tmux >/dev/null 2>&1 || { echo "Нужен tmux: apt install -y tmux"; exit 1; }; }
+window_exists() { tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$1"; }
+
+start_agent() {
+  local name="$1"
+  need_tmux
+  if window_exists "$name"; then echo "Агент $name уже запущен (tmux: $SESSION:$name)."; return 0; fi
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux new-window -d -t "$SESSION" -n "$name" "$SELF fg $name"
+  else
+    tmux new-session -d -s "$SESSION" -n "$name" "$SELF fg $name"
+  fi
+  echo "Агент $name запущен в окне tmux $SESSION:$name"
 }
 
-case "${1:-start}" in
-  start)
-    if is_running; then echo "Бот уже запущен (сессия $SESSION)."; exit 0; fi
-    if command -v tmux >/dev/null 2>&1; then
-      tmux new-session -d -s "$SESSION" "$SELF fg"
-      echo "Бот запущен в tmux. Подключиться: tmux attach -t $SESSION (выйти: Ctrl+B, затем D)"
-    elif command -v screen >/dev/null 2>&1; then
-      screen -dmS "$SESSION" "$SELF" fg
-      echo "Бот запущен в screen. Подключиться: screen -r $SESSION (выйти: Ctrl+A, затем D)"
+case "${1:-all}" in
+  all) exec "$(dirname "$SELF")/run_all.sh" start ;;
+  start) valid_name "${2:-}"; start_agent "$2" ;;
+  fg) valid_name "${2:-}"; loop "$2" ;;
+  stop)
+    valid_name "${2:-}"
+    tmux kill-window -t "$SESSION:$2" 2>/dev/null && echo "Агент $2 остановлен." || echo "Агент $2 не запущен."
+    ;;
+  restart) valid_name "${2:-}"; "$SELF" stop "$2"; sleep 1; "$SELF" start "$2" ;;
+  logs) valid_name "${2:-}"; tail -n 100 -f "logs/$2.log" ;;
+  status)
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      echo "Запущены (tmux $SESSION):"; tmux list-windows -t "$SESSION" -F '  #W'
     else
-      echo "Не найден tmux или screen. Установите: apt install -y tmux"
-      exit 1
+      echo "Агенты не запущены"
     fi
     ;;
-  fg) loop ;;
-  stop)
-    tmux kill-session -t "$SESSION" 2>/dev/null || screen -S "$SESSION" -X quit 2>/dev/null || true
-    echo "Бот остановлен."
-    ;;
-  restart) "$SELF" stop; sleep 1; "$SELF" start ;;
-  attach) tmux attach -t "$SESSION" 2>/dev/null || screen -r "$SESSION" ;;
-  status) if is_running; then echo "Работает (сессия $SESSION)"; else echo "Не запущен"; fi ;;
-  logs) tail -n 100 -f logs/bot.log ;;
-  *) echo "Использование: $0 [start|fg|stop|restart|attach|status|logs]"; exit 1 ;;
+  attach) tmux attach -t "$SESSION" ;;
+  *) echo "Использование: $0 [start|fg|stop|restart|logs <агент>] | status | attach"; exit 1 ;;
 esac

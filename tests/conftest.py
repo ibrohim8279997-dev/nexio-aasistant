@@ -31,10 +31,24 @@ class FakeGroq:
         self.replies: list[str] = []
         self.transcript = ""
         self.prompts: list[list[dict]] = []
+        self.calls: list[dict] = []
+
+    text_model = "openai/gpt-oss-120b"
+    stt_model = "whisper-large-v3-turbo"
 
     async def chat_json(self, messages, max_tokens=2048):
         self.prompts.append(messages)
         return self.replies.pop(0)
+
+    async def chat(self, messages, *, json_mode=False, search=False, max_tokens=2048, agent=""):
+        from bot.ai.groq_client import ChatResult
+
+        self.prompts.append(messages)
+        self.calls.append({"json_mode": json_mode, "search": search, "agent": agent})
+        return ChatResult(self.replies.pop(0))
+
+    async def close(self):
+        return None
 
     async def transcribe(self, audio, filename="voice.ogg"):
         return self.transcript
