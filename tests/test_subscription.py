@@ -81,11 +81,15 @@ async def test_subscription_disabled_flag(tmp_path, db, groq):
     await reg.seed_defaults()
     kimo = await reg.get("kimo")
     scoped = ScopedDB(db, "kimo", kimo.allowed_tables, live=True)
+    bot = FakeBot()
+    ctx = AgentContext(kimo, reg, db)
+    from tests.conftest import attach_admin
+
+    attach_admin(ctx, bot, settings)
     dp = build_dispatcher(
         settings, db=scoped, secrets=SecretStore(db, Crypto(settings.encryption_key)), groq=groq,
-        rates=FakeRates(scoped), agent_ctx=AgentContext(kimo, reg, db),
+        rates=FakeRates(scoped), agent_ctx=ctx, confirm=ctx.admin.confirm,
     )
-    bot = FakeBot()
 
     await dp.feed_update(bot, message_update(55, "купить хлеб"))
     assert "личный бот" in bot.texts()[-1]

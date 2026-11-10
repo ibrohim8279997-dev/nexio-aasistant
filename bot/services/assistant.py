@@ -18,6 +18,7 @@ from bot.ai.actions import (
     Delegate,
     ListReminders,
     ListTasks,
+    ManageAgent,
     Reply,
     ShowStats,
 )
@@ -54,7 +55,8 @@ class AssistantDeps:
     reply_to: int | None = None
     is_group: bool = False
     is_owner: bool = False
-    offer_restart: Any = None  # async (AgentConfig, text) -> Answer: предложить перезапуск с подтверждением
+    offer_restart: Any = None  # async (AgentConfig, text) -> str: предложить перезапуск с подтверждением
+    admin: Any = None  # AdminActions
 
 
 async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
@@ -118,6 +120,11 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
     if isinstance(action, CreateAgent):
         return await _create_agent(action, deps)
 
+    if isinstance(action, ManageAgent):
+        if deps.admin is None or not deps.is_owner:
+            return Answer("Управлять агентами может только владелец.")
+        return Answer(await deps.admin.manage(action.agent, action.op, action.value, deps.chat_id))
+
     log.warning("Неизвестное действие: %s", type(action).__name__)
     return Answer("🤔 Не понял запрос.")
 
@@ -147,7 +154,7 @@ async def _delegate(action: Delegate, deps: AssistantDeps) -> Answer:
     if effective_status(target.last_seen, target.status) == "offline":
         text = f"⚠️ {format_offline(target)}.\nЗадание не передано."
         if deps.offer_restart is not None:
-            return await deps.offer_restart(target, text)
+            return Answer(escape(await deps.offer_restart(target, text)))
         return Answer(text + f"\nЗапустить агента: /agenton {target.name}")
     context = {
         "from": ctx.agent.name, "from_name": ctx.agent.display_name, "owner_request": action.task[:500],

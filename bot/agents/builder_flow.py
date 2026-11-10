@@ -4,18 +4,17 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
+from bot.agents import procs
 from bot.agents.bus import BusError
 from bot.agents.cards import GRANTABLE_TABLES, AgentCard, CardError, card_to_agent
 from bot.agents.context import AgentContext
 from bot.agents.registry import TOKEN_RE  # noqa: F401 — реэкспорт для хендлеров
-from bot.config import BASE_DIR
 from bot.crypto import SecretStore
 from bot.runner import TOKEN_SECRET
 from bot.timeutil import now_utc, to_db
@@ -124,26 +123,11 @@ async def accept_token(ctx: AgentContext, secrets: SecretStore, name: str, token
 
 async def launch(name: str) -> tuple[bool, str]:
     """Запустить агента в новом окне tmux (./run.sh start <имя>)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            str(BASE_DIR / "run.sh"), "start", name,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=str(BASE_DIR),
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except (OSError, asyncio.TimeoutError) as exc:
-        return False, type(exc).__name__
-    return proc.returncode == 0, out.decode(errors="replace").strip()[-300:]
+    return await procs.get_control().start(name)
 
 
 async def stop(name: str) -> None:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            str(BASE_DIR / "run.sh"), "stop", name,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, cwd=str(BASE_DIR),
-        )
-        await asyncio.wait_for(proc.wait(), timeout=15)
-    except (OSError, asyncio.TimeoutError):
-        log.warning("Не удалось остановить агента %s", name)
+    await procs.get_control().stop(name)
 
 
 async def wait_alive(ctx: AgentContext, name: str, timeout: float = PING_TIMEOUT) -> bool:

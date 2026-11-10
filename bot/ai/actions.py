@@ -106,16 +106,35 @@ class Clarify(_Base):
     question: str = Field(min_length=1, max_length=300)
 
 
+ManageOp = Literal[
+    "start", "stop", "restart", "rename", "set_role", "set_prompt", "set_models",
+    "grant_tables", "revoke_tables", "grant_commands", "revoke_commands",
+]
+
+
+class ManageAgent(_Base):
+    """Управление агентом (только владелец; исполняется после его «да» в личке)."""
+
+    type: Literal["manage_agent"]
+    agent: str = Field(min_length=1, max_length=64)
+    op: ManageOp
+    value: Any = None
+
+
 class CreateAgent(_Base):
     type: Literal["create_agent"]
     description: str = Field(min_length=10, max_length=3000)
 
 
 Action = Annotated[
-    Union[AddTask, AddExpense, CompleteTask, ListTasks, ShowStats, Reply, ListReminders, Delegate, Clarify, CreateAgent],
+    Union[
+        AddTask, AddExpense, CompleteTask, ListTasks, ShowStats, Reply, ListReminders, Delegate, Clarify, CreateAgent,
+        ManageAgent,
+    ],
     Field(discriminator="type"),
 ]
 DISPATCH_TYPES = (Delegate, CreateAgent)
+ADMIN_TYPES: tuple[type, ...] = (ManageAgent,)  # только от владельца, не из шины
 _ACTION_ADAPTER: TypeAdapter[Any] = TypeAdapter(Action)
 
 
@@ -172,6 +191,8 @@ def parse_actions(raw: str, today: date, agents: set[str] | None = None) -> list
             continue
         if isinstance(action, CreateAgent) and agents is None:
             continue
+        if isinstance(action, ADMIN_TYPES) and agents is None:
+            continue
         actions.append(action)
     if not actions and items:
         raise ActionParseError("ни одно действие не прошло проверку")
@@ -196,6 +217,7 @@ SYSTEM_PROMPT = """{identity}
 8. {{"type":"delegate","agent":"<системное имя агента>","task":"<полная формулировка задачи>"}}
 9. {{"type":"clarify","question":"<один короткий вопрос>"}}
 10. {{"type":"create_agent","description":"<полное описание нужного агента: задачи, что можно, что нельзя, конфиденциальность>"}}
+11. {{"type":"manage_agent","agent":"<имя или системное имя>","op":"start|stop|restart|rename|set_role|set_prompt|set_models|grant_tables|revoke_tables|grant_commands|revoke_commands","value":<строка или список, если нужно>}} — управление агентом; владелец подтвердит в личке
 
 Правила:
 - Даты «сегодня», «завтра», «послезавтра», «в пятницу», «через 2 часа», «bugun», «ertaga» переводи в date и time по текущему времени Ташкента.

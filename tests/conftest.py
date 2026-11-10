@@ -55,6 +55,18 @@ class FakeGroq:
         return self.transcript
 
 
+def attach_admin(ctx, bot, settings, log_dir=None):
+    """Слой admin/подтверждений для агента (как в run_kimo)."""
+    from bot.agents.admin_actions import AdminActions
+    from bot.agents.admin_ops import AdminOps
+    from bot.agents.confirm import Confirmations
+
+    ops = AdminOps(ctx.system_db, ctx.agent.name, log_dir)
+    confirm = Confirmations(ctx.system_db, ctx.agent.name, ops, settings.admin_id, online_timeout=3.0)
+    ctx.admin = AdminActions(ctx, ops, confirm, bot)
+    return ctx.admin
+
+
 class FakeRates:
     """Курс без сети: фиксированный 12 000 сум за $."""
 
@@ -128,6 +140,8 @@ async def app(tmp_path, db, groq):
     from bot.agents.bus import Bus
 
     ctx = AgentContext(agent=kimo, registry=registry, system_db=db, bus=Bus(db, "kimo", owner_id=ADMIN_ID))
-    deps = dict(db=scoped, secrets=secrets, groq=groq, rates=FakeRates(scoped), agent_ctx=ctx)
+    bot = FakeBot()
+    attach_admin(ctx, bot, settings)
+    deps = dict(db=scoped, secrets=secrets, groq=groq, rates=FakeRates(scoped), agent_ctx=ctx, confirm=ctx.admin.confirm)
     dp = build_dispatcher(settings, **deps)
-    return dp, FakeBot(), settings
+    return dp, bot, settings

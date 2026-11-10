@@ -12,6 +12,9 @@ from aiogram.types import BotCommand, ErrorEvent
 from bot.agents.access import ScopedDB
 from bot.agents.bus import BusWorker
 from bot.agents.context import AgentContext
+from bot.agents.admin_actions import AdminActions
+from bot.agents.admin_ops import AdminOps
+from bot.agents.confirm import Confirmations
 from bot.agents.kimo import KimoBusHandler
 from bot.agents.watchdog import Watchdog
 from bot.ai.llm import LLMClient
@@ -77,12 +80,14 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
     return dp
 
 
-def make_notifier(bot: Bot, owner_id: int):
-    """Сообщение владельцу в личку (watchdog и проверки живости)."""
+def make_notifier(bot: Bot, owner_id: int, admin: AdminActions | None = None):
+    """Сообщение владельцу в личку (watchdog). Для offline-агента сразу предлагает перезапуск с подтверждением."""
 
     async def notify(text: str, target: Any = None) -> None:
         try:
             await bot.send_message(owner_id, text, parse_mode=None)
+            if admin is not None:
+                await admin.offer_restart_if_dead(target)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось отправить владельцу сообщение: %s", type(exc).__name__)
 
@@ -97,10 +102,13 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
     secrets = SecretStore(ctx.system_db, crypto)
     rates = RatesService(scoped)  # type: ignore[arg-type]
 
-    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx)
+    ops = AdminOps(ctx.system_db, agent.name)  # слой admin: чтение структуры, логов, статусов; роль из БД
+    confirm = Confirmations(ctx.system_db, agent.name, ops, settings.admin_id)
+    ctx.admin = AdminActions(ctx, ops, confirm, bot)
+    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx, confirm=confirm)
     scheduler = BotScheduler(bot, scoped, settings, system_db=ctx.system_db)  # type: ignore[arg-type]
     worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings), bot, settings.admin_id, state=ctx.state)
-    watchdog = Watchdog(ctx.system_db, ctx.registry, make_notifier(bot, settings.admin_id), own_agent=agent.name)
+    watchdog = Watchdog(ctx.system_db, ctx.registry, make_notifier(bot, settings.admin_id, ctx.admin), own_agent=agent.name)
     worker_task: asyncio.Task[None] | None = None
     watchdog_task: asyncio.Task[None] | None = None
     try:

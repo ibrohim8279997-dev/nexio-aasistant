@@ -74,6 +74,8 @@ async def make_deps(
         reply_to=message.message_id,
         is_group=is_group(message),
         is_owner=bool(message.from_user and message.from_user.id == settings.admin_id),
+        offer_restart=agent_ctx.admin.offer_restart if agent_ctx.admin else None,
+        admin=agent_ctx.admin,
     )
 
 

@@ -16,6 +16,7 @@ class AgentContext:
     system_db: Database  # только для системных сервисов (реестр, шина); данные — через ScopedDB
     bus: Any = None  # bot.agents.bus.Bus, подключается в run_agent
     state: AgentState = field(default_factory=AgentState)  # живое состояние для heartbeat
+    admin: Any = None  # AdminActions: управление агентами (у Кимо и Мимо)
 
     async def identity(self) -> str:
         return await self.registry.identity_prompt(self.agent)

@@ -193,3 +193,17 @@ def agent_card_kb(name: str, has_suggestions: bool) -> InlineKeyboardMarkup:
     rows.append([btn("Да, без доступа к таблицам", AgentCb(action="yes_none", name=name), "success", "✅")])
     rows.append([btn("Отмена", AgentCb(action="cancel", name=name), "danger", "✖️")])
     return _kb(rows)
+
+
+class ConfirmCb(CallbackData, prefix="cf"):
+    id: int
+    yes: int  # 1 — подтвердить, 0 — отменить
+
+
+def confirm_kb(pending_id: int) -> InlineKeyboardMarkup:
+    return _kb(
+        [[
+            btn("Да", ConfirmCb(id=pending_id, yes=1), "success", "✅"),
+            btn("Нет", ConfirmCb(id=pending_id, yes=0), "danger", "✖️"),
+        ]]
+    )
