@@ -74,6 +74,8 @@ class KimoBusHandler:
         if not actions:
             reason = "расходы другим агентам не передаются" if parsed else "не удалось понять запрос"
             raise BusError(f"Кимо не смог выполнить задание: {reason}")
-        deps = assistant.AssistantDeps(db=self.db, user=owner, rates=self.rates, identity=identity)
+        deps = assistant.AssistantDeps(  # запрос от агента: не владелец, логи и управление недоступны
+            db=self.db, user=owner, rates=self.rates, identity=identity, admin=self.ctx.admin, is_owner=False,
+        )
         answers = await assistant.execute(actions, deps)
         return plain_text("\n\n".join(a.text for a in answers))

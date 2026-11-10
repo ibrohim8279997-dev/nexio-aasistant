@@ -10,6 +10,10 @@ from typing import Any
 from aiogram.types import InlineKeyboardMarkup
 
 from bot.ai.actions import (
+    AgentData,
+    AgentLogs,
+    AgentsReport,
+    AgentTables,
     AddExpense,
     AddTask,
     Clarify,
@@ -36,6 +40,8 @@ from bot.services.rates import RatesService
 from bot.timeutil import TZ, from_db, now_local, now_utc, to_db
 
 log = logging.getLogger(__name__)
+
+ADMIN_ACTIONS = (ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData)
 
 
 @dataclass
@@ -120,10 +126,11 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
     if isinstance(action, CreateAgent):
         return await _create_agent(action, deps)
 
-    if isinstance(action, ManageAgent):
-        if deps.admin is None or not deps.is_owner:
-            return Answer("Управлять агентами может только владелец.")
-        return Answer(await deps.admin.manage(action.agent, action.op, action.value, deps.chat_id))
+    if isinstance(action, ADMIN_ACTIONS):
+        if deps.admin is None:
+            return Answer("Управление агентами здесь недоступно.")
+        text = await deps.admin.run(action, owner=deps.is_owner, chat_id=deps.chat_id)
+        return Answer(text or "🤔 Не понял запрос.")
 
     log.warning("Неизвестное действие: %s", type(action).__name__)
     return Answer("🤔 Не понял запрос.")

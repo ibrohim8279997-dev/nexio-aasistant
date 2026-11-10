@@ -20,7 +20,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import ErrorEvent, Message
 from pydantic import BaseModel, Field, ValidationError
 
-from bot.agents.bus import BusError, BusWorker, DepthExceeded, chunks
+from bot.agents.bus import BusError, BusWorker, DepthExceeded, chunks, plain_text
 from bot.agents.cards import CardError, builder_messages, parse_card
 from bot.agents.context import AgentContext
 from bot.agents.registry import TOKEN_RE, norm_name
@@ -81,6 +81,18 @@ PLAN_PROMPT = """{identity}
 Отвечай на языке владельца. Не выдумывай факты."""
 
 SEARCH_LINE = '{"action": "search", "query": "поисковый запрос"} — если нужны свежие факты из интернета.\n'
+
+
+ADMIN_PLAN_PROMPT = """{identity}
+
+Сейчас: {now}.
+Ты управляешь только теми агентами, которых создал сам ({own}). Верни ТОЛЬКО JSON {{"actions": [...]}} из действий:
+{{"type":"agents_report"}} — кто работает, статусы и проблемы
+{{"type":"agent_logs","agent":"<имя>","minutes":<N или null>}} — лог агента
+{{"type":"agent_tables","agent":"<имя>"}} — структура таблиц агента; {{"type":"agent_data","agent":"<имя>","table":"<таблица>","limit":10}} — данные
+{{"type":"manage_agent","agent":"<имя>","op":"start|stop|restart|rename|set_role|set_prompt|set_models|grant_tables|revoke_tables|grant_commands|revoke_commands","value":<строка или список>}} — изменение, владелец подтвердит «да» в личке
+{{"type":"clarify","question":"<один короткий вопрос>"}} и {{"type":"reply","text":"<ответ>"}} — если запрос не про агентов или неясен.
+Чужими агентами, расходами и секретами ты не занимаешься. Не выдумывай данные."""
 
 
 class GenericAgent:
@@ -147,6 +159,37 @@ class GenericAgent:
             return float(target.config.get("task_timeout_s", 60)) + 5.0
         except (TypeError, ValueError):
             return 65.0
+
+    async def answer_admin(self, text: str, chat: tuple[int | None, int | None] = (None, None)) -> str:
+        """Прямой разговор владельца с Мимо: отчёты и управление агентами, созданными им самим."""
+        from bot.ai.actions import Clarify, Reply, parse_actions
+        from bot.timeutil import now_local
+
+        admin = self.ctx.admin
+        own = await admin.ops.visible_agents()
+        identity = await self.ctx.identity()
+        system = ADMIN_PLAN_PROMPT.format(
+            identity=identity, now=context_now_text(),
+            own=", ".join(f"{a.display_name} ({a.name})" for a in own) or "пока нет",
+        )
+        raw = (await self.llm.chat([{"role": "system", "content": system}, {"role": "user", "content": text}],
+                                    json_mode=True, agent=self.name)).content
+        aliases = {norm_name(a.name) for a in own} | {norm_name(a.display_name) for a in own}
+        try:
+            actions = parse_actions(raw, now_local().date(), agents=aliases)
+        except Exception:  # noqa: BLE001 — нет JSON: обычный ответ модели
+            return await self._final(identity, text, "")
+        parts = []
+        for action in actions:
+            if isinstance(action, Reply):
+                parts.append(action.text)
+            elif isinstance(action, Clarify):
+                parts.append(f"❓ {action.question}")
+            else:
+                out = await admin.run(action, owner=True, chat_id=chat[0])
+                if out:
+                    parts.append(plain_text(out))
+        return "\n\n".join(parts) or "Не понял запрос. Могу показать агентов, логи, статусы или изменить настройки своих агентов."
 
     async def _search(self, identity: str, text: str, query: str) -> str:
         system = (
@@ -234,7 +277,11 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
         except TelegramAPIError:
             pass
         try:
-            answer = await agent.answer(text[:MAX_TEXT_LEN], chat=(message.chat.id, message.message_id))
+            chat = (message.chat.id, message.message_id)
+            if agent.ctx.admin is not None and agent.ctx.agent.kind == "builder":
+                answer = await agent.answer_admin(text[:MAX_TEXT_LEN], chat)
+            else:
+                answer = await agent.answer(text[:MAX_TEXT_LEN], chat=chat)
         except GroqError as exc:
             agent.ctx.state.set_error(f"Groq: {type(exc).__name__}")
             answer = exc.user_message
@@ -297,6 +344,19 @@ async def run_generic(settings: Settings, ctx: AgentContext, llm: LLMClient, bot
     dp = Dispatcher()
     throttling = ThrottlingMiddleware(settings.rate_limit_per_min, settings.admin_id)
     dp.message.outer_middleware(throttling)
+    dp.callback_query.outer_middleware(throttling)
+    if ctx.agent.access_role in ("creator", "admin"):
+        # Мимо (creator): управление только созданными им агентами; роль проверяется в БД при каждом действии
+        from bot.agents.admin_actions import AdminActions
+        from bot.agents.admin_ops import AdminOps
+        from bot.agents.confirm import Confirmations
+        from bot.handlers import confirm as confirm_handlers
+
+        ops = AdminOps(ctx.system_db, ctx.agent.name)
+        confirm = Confirmations(ctx.system_db, ctx.agent.name, ops, settings.admin_id)
+        ctx.admin = AdminActions(ctx, ops, confirm, bot)
+        dp["confirm"] = confirm
+        dp.include_router(confirm_handlers.router)
     dp.include_router(build_router(agent, me.id, me.username))
 
     @dp.errors()

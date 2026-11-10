@@ -14,6 +14,7 @@ from bot.agents.admin_ops import AdminError, AdminOps
 from bot.agents.confirm import Confirmations, ConfirmError
 from bot.agents.context import AgentContext
 from bot.agents.health import effective_status
+from bot.agents import report
 from bot.agents.registry import AgentConfig
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,38 @@ class AdminActions:
             return "⚠️ Не смог написать вам в личку. Откройте чат со мной и нажмите /start, затем повторите."
         suffix = " Это расширение прав: отдельное подтверждение." if proposal.expands else ""
         return f"📨 Отправил в личку на подтверждение (#{proposal.id}): {escape(proposal.summary.splitlines()[0])}.{suffix}"
+
+    async def run(self, action: Any, *, owner: bool, chat_id: int | None = None) -> str | None:
+        """Выполнить административное действие от модели. Возвращает HTML-текст или None, если действие не административное."""
+        from bot.ai.actions import AgentData, AgentLogs, AgentsReport, AgentTables, ManageAgent
+
+        try:
+            if isinstance(action, AgentsReport):
+                return await report.agents_report(self.ops, include_logs=owner)  # через шину логи не отдаём
+            if not owner:
+                return "Это действие доступно только владельцу."
+            if isinstance(action, ManageAgent):
+                return await self.manage(action.agent, action.op, action.value, chat_id)
+            if isinstance(action, AgentLogs):
+                target = await self._target(action.agent)
+                return await report.agent_logs(self.ops, target.display_name, target.name, action.minutes)
+            if isinstance(action, AgentTables):
+                target = await self._target(action.agent) if action.agent else None
+                tables = await self.ops.list_tables(target.name if target else None)
+                return report.tables_report(target.display_name if target else "всей БД", tables)
+            if isinstance(action, AgentData):
+                target = await self._target(action.agent)
+                rows = await self.ops.read_rows(target.name, action.table, action.limit)
+                return report.rows_report(target.display_name, action.table, rows)
+        except (AdminError, ConfirmError) as exc:
+            return f"⚠️ {escape(str(exc))}"
+        return None
+
+    async def _target(self, query: str) -> AgentConfig:
+        target = await self.find(query)
+        if target is None:
+            raise AdminError("Не нашёл такого агента. Назовите его имя или системное имя.")
+        return target
 
     async def offer_restart(self, target: AgentConfig, text: str = "") -> str:
         """Предложить перезапуск агента (с подтверждением «да» в личке). Не дублирует уже ожидающее предложение."""
