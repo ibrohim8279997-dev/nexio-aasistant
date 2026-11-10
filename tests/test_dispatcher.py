@@ -51,7 +51,7 @@ async def test_group_delegate_reply_from_target_agent(app, db, groq):
     groq.replies.append(json.dumps({"actions": [{"type": "delegate", "agent": "assistant", "task": "переведи hello"}]}))
     upd = group_message_update(ADMIN_ID, "переведи hello на русский")
     await dp.feed_update(bot, upd)
-    assert "Ассистент" in bot.texts()[-1] and reply_id(bot.calls[-1]) == upd.message.message_id
+    assert "Мими" in bot.texts()[-1] and reply_id(bot.calls[-1]) == upd.message.message_id
 
     task = await db.queue_claim("assistant", "2026-11-08 10:00:00")
     assert task["from_agent"] == "kimo" and task["chat_id"] == -100500 and task["depth"] == 1

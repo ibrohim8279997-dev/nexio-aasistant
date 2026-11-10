@@ -118,15 +118,105 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_queue_to_status ON tasks_queue(to_agent, status, id);
     """,
+    # 3: имена агентов, роли доступа, heartbeat, доставка результатов, аудит, подтверждения
+    """
+    ALTER TABLE agents ADD COLUMN display_name     TEXT;
+    ALTER TABLE agents ADD COLUMN role_description TEXT;
+    ALTER TABLE agents ADD COLUMN access_role      TEXT NOT NULL DEFAULT 'agent';
+    ALTER TABLE agents ADD COLUMN created_by       TEXT;
+    ALTER TABLE agents ADD COLUMN last_seen        TEXT;
+    ALTER TABLE agents ADD COLUMN status           TEXT NOT NULL DEFAULT 'offline';
+    ALTER TABLE agents ADD COLUMN status_detail    TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE agents ADD COLUMN last_error       TEXT;
+
+    -- ничего не теряем: прежнее описание роли сохраняется в role_description
+    UPDATE agents SET role_description = role WHERE role_description IS NULL;
+    UPDATE agents SET display_name = 'Кимо', access_role = 'admin'   WHERE name = 'kimo';
+    UPDATE agents SET display_name = 'Мимо', access_role = 'creator' WHERE name = 'agent_builder';
+    UPDATE agents SET display_name = 'Мими'                          WHERE name = 'assistant';
+    -- для остальных берём имя из config, только если оно похоже на имя (одно слово), а не на описание
+    UPDATE agents SET display_name = json_extract(config, '$.display_name')
+     WHERE display_name IS NULL AND json_valid(config)
+       AND length(json_extract(config, '$.display_name')) BETWEEN 2 AND 20
+       AND json_extract(config, '$.display_name') NOT LIKE '% %'
+       AND json_extract(config, '$.display_name') NOT LIKE '%,%';
+    -- агенты, созданные через Мимо (всё, кроме стартовых), записываются за ним
+    UPDATE agents SET created_by = 'agent_builder'
+     WHERE created_by IS NULL AND name NOT IN ('kimo', 'agent_builder', 'assistant');
+    -- значения секретов не видит никто, в том числе Кимо
+    UPDATE agents SET allowed_tables = (SELECT json_group_array(value) FROM json_each(allowed_tables) WHERE value <> 'secrets')
+     WHERE name = 'kimo' AND json_valid(allowed_tables);
+
+    -- собственная таблица ассистента
+    CREATE TABLE IF NOT EXISTS agent_assistant_notes (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        kind       TEXT NOT NULL DEFAULT 'note',
+        text       TEXT NOT NULL
+    );
+    UPDATE agents SET allowed_tables = json_insert(allowed_tables, '$[#]', 'agent_assistant_notes')
+     WHERE name = 'assistant' AND json_valid(allowed_tables)
+       AND NOT EXISTS (SELECT 1 FROM json_each(allowed_tables) WHERE value = 'agent_assistant_notes');
+
+    ALTER TABLE tasks_queue ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks_queue ADD COLUMN reply     INTEGER NOT NULL DEFAULT 0;
+    UPDATE tasks_queue SET delivered = 1;  -- старые результаты повторно не доставляем
+    CREATE INDEX IF NOT EXISTS idx_queue_undelivered ON tasks_queue(from_agent, status, delivered);
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           TEXT NOT NULL,
+        actor        TEXT NOT NULL,
+        action       TEXT NOT NULL,
+        target       TEXT,
+        details      TEXT NOT NULL DEFAULT '{}',
+        result       TEXT NOT NULL DEFAULT 'ok',
+        confirmed_by INTEGER,
+        report_id    INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+    CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target, action, ts);
+
+    CREATE TABLE IF NOT EXISTS pending_actions (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at     TEXT NOT NULL,
+        expires_at     TEXT NOT NULL,
+        actor          TEXT NOT NULL,
+        action         TEXT NOT NULL,
+        target         TEXT,
+        params         TEXT NOT NULL DEFAULT '{}',
+        summary        TEXT NOT NULL DEFAULT '',
+        status         TEXT NOT NULL DEFAULT 'new',
+        result         TEXT,
+        chat_id        INTEGER,
+        expands_rights INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_actor ON pending_actions(actor, status, id);
+    """,
 ]
 
 # Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
 DOWN_MIGRATIONS: dict[int, str] = {
     2: "DROP TABLE IF EXISTS tasks_queue; DROP TABLE IF EXISTS agents;",
+    3: """
+        DROP TABLE IF EXISTS pending_actions; DROP TABLE IF EXISTS audit_log;
+        DROP TABLE IF EXISTS agent_assistant_notes;
+        DROP INDEX IF EXISTS idx_queue_undelivered;
+        ALTER TABLE tasks_queue DROP COLUMN delivered; ALTER TABLE tasks_queue DROP COLUMN reply;
+        ALTER TABLE agents DROP COLUMN display_name; ALTER TABLE agents DROP COLUMN role_description;
+        ALTER TABLE agents DROP COLUMN access_role;  ALTER TABLE agents DROP COLUMN created_by;
+        ALTER TABLE agents DROP COLUMN last_seen;    ALTER TABLE agents DROP COLUMN status;
+        ALTER TABLE agents DROP COLUMN status_detail; ALTER TABLE agents DROP COLUMN last_error;
+    """,
 }
 
-AGENT_JSON_FIELDS = ("models", "allowed_tables", "allowed_commands", "deny_rules", "config")
-AGENT_COLUMNS = ("role", "bot_username", "system_prompt", "enabled", *AGENT_JSON_FIELDS)
+AGENT_JSON_FIELDS = ("models", "allowed_tables", "allowed_commands", "deny_rules", "config", "status_detail")
+_JSON_DICT_FIELDS = ("models", "config", "status_detail")
+AGENT_COLUMNS = (
+    "role", "bot_username", "system_prompt", "enabled", "display_name", "role_description", "access_role",
+    "created_by", "last_seen", "status", "last_error", *AGENT_JSON_FIELDS,
+)
+ACCESS_ROLES = ("admin", "creator", "agent")
 
 
 def _restrict_permissions(path: Path) -> None:
@@ -488,26 +578,33 @@ class Database:
             return None
         for field in AGENT_JSON_FIELDS:
             try:
-                row[field] = json.loads(row[field] or ("{}" if field in ("models", "config") else "[]"))
+                row[field] = json.loads(row.get(field) or ("{}" if field in _JSON_DICT_FIELDS else "[]"))
             except (TypeError, ValueError):
-                row[field] = {} if field in ("models", "config") else []
+                row[field] = {} if field in _JSON_DICT_FIELDS else []
         row["enabled"] = bool(row["enabled"])
         return row
 
     async def insert_agent(self, agent: dict[str, Any], now: str, replace: bool = False) -> bool:
         """Добавить агента. replace=False — не трогать существующего (seed). True, если запись изменилась."""
+        access_role = agent.get("access_role", "agent")
+        if access_role not in ACCESS_ROLES:
+            raise ValueError(f"access_role: {', '.join(ACCESS_ROLES)}")
         values = [agent["name"], agent["role"], agent.get("bot_username"), agent.get("system_prompt", ""),
                   json.dumps(agent.get("models", {}), ensure_ascii=False),
                   json.dumps(agent.get("allowed_tables", []), ensure_ascii=False),
                   json.dumps(agent.get("allowed_commands", []), ensure_ascii=False),
                   json.dumps(agent.get("deny_rules", []), ensure_ascii=False),
                   int(bool(agent.get("enabled", False))),
-                  json.dumps(agent.get("config", {}), ensure_ascii=False), now]
+                  json.dumps(agent.get("config", {}), ensure_ascii=False), now,
+                  agent.get("display_name"), agent.get("role_description") or agent["role"], access_role,
+                  agent.get("created_by"), agent.get("last_seen"), agent.get("status", "offline"),
+                  json.dumps(agent.get("status_detail", {}), ensure_ascii=False), agent.get("last_error")]
         verb = "INSERT OR REPLACE" if replace else "INSERT OR IGNORE"
         cur = await self._write(
             f"""{verb} INTO agents (name, role, bot_username, system_prompt, models, allowed_tables,
-                allowed_commands, deny_rules, enabled, config, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                allowed_commands, deny_rules, enabled, config, created_at, display_name, role_description,
+                access_role, created_by, last_seen, status, status_detail, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             tuple(values),
         )
         return cur.rowcount > 0
@@ -532,6 +629,8 @@ class Database:
                 value = json.dumps(value, ensure_ascii=False)
             elif key == "enabled":
                 value = int(bool(value))
+            elif key == "access_role" and value not in ACCESS_ROLES:
+                raise ValueError(f"access_role: {', '.join(ACCESS_ROLES)}")
             params.append(value)
         cur = await self._write(f"UPDATE agents SET {', '.join(sets)} WHERE name = ?", (*params, name))
         return cur.rowcount > 0
@@ -554,12 +653,15 @@ class Database:
         depth: int = 0,
         status: str = "new",
         result: str | None = None,
+        reply: bool = False,
+        delivered: bool = False,
     ) -> int:
         cur = await self._write(
             """INSERT INTO tasks_queue (from_agent, to_agent, payload, status, result, chat_id,
-               reply_to_message_id, depth, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               reply_to_message_id, depth, created_at, updated_at, reply, delivered)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (from_agent, to_agent, json.dumps(payload, ensure_ascii=False), status, result, chat_id,
-             reply_to_message_id, depth, now, now),
+             reply_to_message_id, depth, now, now, int(reply), int(delivered)),
         )
         return int(cur.lastrowid)
 
@@ -588,12 +690,69 @@ class Database:
                 row["payload"] = {}
         return row
 
-    async def queue_finish(self, task_id: int, status: str, result: str | None, now: str) -> None:
+    async def queue_finish(self, task_id: int, status: str, result: str | None, now: str) -> bool:
+        """Завершить взятое задание. False — задание уже закрыто (например, watchdog пометил failed по таймауту)."""
         if status not in ("done", "failed"):
             raise ValueError("status: done | failed")
-        await self._write(
-            "UPDATE tasks_queue SET status = ?, result = ?, updated_at = ? WHERE id = ?", (status, result, now, task_id)
+        cur = await self._write(
+            "UPDATE tasks_queue SET status = ?, result = ?, updated_at = ? WHERE id = ? AND status = 'taken'",
+            (status, result, now, task_id),
         )
+        return cur.rowcount > 0
+
+    async def queue_force_fail(self, task_id: int, result: str, now: str) -> bool:
+        """Принудительно закрыть новое/взятое задание (watchdog). False — уже закрыто."""
+        cur = await self._write(
+            "UPDATE tasks_queue SET status = 'failed', result = ?, updated_at = ? "
+            "WHERE id = ? AND status IN ('new', 'taken')",
+            (result, now, task_id),
+        )
+        return cur.rowcount > 0
+
+    async def queue_mark_delivered(self, task_id: int) -> bool:
+        """Атомарно: True получает только тот, кто первым отметил результат доставленным."""
+        cur = await self._write("UPDATE tasks_queue SET delivered = 1 WHERE id = ? AND delivered = 0", (task_id,))
+        return cur.rowcount > 0
+
+    async def queue_unmark_delivered(self, task_id: int) -> None:
+        await self._write("UPDATE tasks_queue SET delivered = 0 WHERE id = ?", (task_id,))
+
+    async def queue_undelivered(self, from_agent: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Завершённые задания агента, результат которых ещё не отправлен в чат."""
+        rows = await self._all(
+            """SELECT * FROM tasks_queue WHERE from_agent = ? AND status IN ('done', 'failed')
+               AND delivered = 0 AND reply = 1 ORDER BY id LIMIT ?""",
+            (from_agent, limit),
+        )
+        for row in rows:
+            try:
+                row["payload"] = json.loads(row["payload"])
+            except ValueError:
+                row["payload"] = {}
+        return rows
+
+    async def queue_open(self, statuses: tuple[str, ...] = ("new", "taken"), limit: int = 200) -> list[dict[str, Any]]:
+        marks = ",".join("?" for _ in statuses)
+        rows = await self._all(
+            f"SELECT * FROM tasks_queue WHERE status IN ({marks}) ORDER BY id LIMIT ?", (*statuses, limit)
+        )
+        for row in rows:
+            try:
+                row["payload"] = json.loads(row["payload"])
+            except ValueError:
+                row["payload"] = {}
+        return rows
+
+    async def queue_counts(self) -> list[dict[str, Any]]:
+        return await self._all("SELECT to_agent, status, COUNT(*) AS n FROM tasks_queue GROUP BY to_agent, status")
+
+    async def queue_recent_failed(self, limit: int = 5, to_agent: str | None = None) -> list[dict[str, Any]]:
+        if to_agent:
+            return await self._all(
+                "SELECT * FROM tasks_queue WHERE status = 'failed' AND to_agent = ? ORDER BY id DESC LIMIT ?",
+                (to_agent, limit),
+            )
+        return await self._all("SELECT * FROM tasks_queue WHERE status = 'failed' ORDER BY id DESC LIMIT ?", (limit,))
 
     async def queue_fail_interrupted(self, to_agent: str, now: str) -> int:
         """Задания, взятые агентом до перезапуска, помечаются failed (не повторяем: возможны дубли действий)."""
@@ -609,3 +768,154 @@ class Database:
             "DELETE FROM tasks_queue WHERE status IN ('done', 'failed') AND updated_at < ?", (before,)
         )
         return cur.rowcount
+
+    # ---------- heartbeat ----------
+
+    async def agent_heartbeat(
+        self, name: str, status: str, now: str, last_error: str | None = None, detail: dict[str, Any] | None = None
+    ) -> None:
+        """Агент сообщает о себе. last_error=None не стирает прошлую ошибку, пустая строка стирает."""
+        if status not in ("online", "busy", "error", "offline"):
+            raise ValueError("status: online | busy | error | offline")
+        await self._write(
+            """UPDATE agents SET last_seen = ?, status = ?, status_detail = ?,
+               last_error = CASE WHEN ? IS NULL THEN last_error WHEN ? = '' THEN NULL ELSE ? END WHERE name = ?""",
+            (now, status, json.dumps(detail or {}, ensure_ascii=False), last_error, last_error, last_error, name),
+        )
+
+    # ---------- аудит и подтверждения ----------
+
+    async def audit(
+        self,
+        ts: str,
+        actor: str,
+        action: str,
+        target: str | None = None,
+        details: dict[str, Any] | None = None,
+        result: str = "ok",
+        confirmed_by: int | None = None,
+        report_id: int | None = None,
+    ) -> int:
+        cur = await self._write(
+            """INSERT INTO audit_log (ts, actor, action, target, details, result, confirmed_by, report_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ts, actor, action, target, json.dumps(details or {}, ensure_ascii=False), result, confirmed_by, report_id),
+        )
+        return int(cur.lastrowid)
+
+    async def audit_list(
+        self, limit: int = 20, target: str | None = None, action: str | None = None, since: str | None = None
+    ) -> list[dict[str, Any]]:
+        where, params = ["1 = 1"], []
+        for col, val in (("target", target), ("action", action)):
+            if val is not None:
+                where.append(f"{col} = ?")  # col — из фиксированного набора выше
+                params.append(val)
+        if since:
+            where.append("ts >= ?")
+            params.append(since)
+        return await self._all(
+            f"SELECT * FROM audit_log WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?", (*params, limit)
+        )
+
+    async def pending_create(
+        self,
+        actor: str,
+        action: str,
+        target: str | None,
+        params: dict[str, Any],
+        summary: str,
+        now: str,
+        expires_at: str,
+        chat_id: int | None = None,
+        expands_rights: bool = False,
+    ) -> int:
+        cur = await self._write(
+            """INSERT INTO pending_actions (created_at, expires_at, actor, action, target, params, summary,
+               chat_id, expands_rights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, expires_at, actor, action, target, json.dumps(params, ensure_ascii=False), summary, chat_id,
+             int(expands_rights)),
+        )
+        return int(cur.lastrowid)
+
+    @staticmethod
+    def _pending_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row:
+            try:
+                row["params"] = json.loads(row["params"])
+            except ValueError:
+                row["params"] = {}
+        return row
+
+    async def pending_get(self, pending_id: int) -> dict[str, Any] | None:
+        return self._pending_row(await self._one("SELECT * FROM pending_actions WHERE id = ?", (pending_id,)))
+
+    async def pending_take(self, pending_id: int, new_status: str, now: str) -> bool:
+        """Атомарно перевести new -> confirmed/rejected. Повторное нажатие кнопки ничего не делает."""
+        cur = await self._write(
+            "UPDATE pending_actions SET status = ? WHERE id = ? AND status = 'new' AND expires_at > ?",
+            (new_status, pending_id, now),
+        )
+        return cur.rowcount > 0
+
+    async def pending_finish(self, pending_id: int, status: str, result: str | None) -> None:
+        await self._write("UPDATE pending_actions SET status = ?, result = ? WHERE id = ?", (status, result, pending_id))
+
+    async def pending_open(self, actor: str, now: str) -> list[dict[str, Any]]:
+        rows = await self._all(
+            "SELECT * FROM pending_actions WHERE actor = ? AND status = 'new' AND expires_at > ? ORDER BY id",
+            (actor, now),
+        )
+        return [self._pending_row(r) for r in rows]  # type: ignore[misc]
+
+    async def pending_expire(self, now: str) -> int:
+        cur = await self._write(
+            "UPDATE pending_actions SET status = 'expired' WHERE status = 'new' AND expires_at <= ?", (now,)
+        )
+        return cur.rowcount
+
+    # ---------- структура БД (только для слоя admin) ----------
+
+    async def table_names(self) -> list[str]:
+        rows = await self._all("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        return [r["name"] for r in rows]
+
+    async def table_columns(self, table: str) -> list[dict[str, Any]]:
+        if table not in await self.table_names():  # имя таблицы только из sqlite_master
+            raise ValueError("нет такой таблицы")
+        return await self._all(f'PRAGMA table_info("{table}")')
+
+    async def table_rows(self, table: str, columns: list[str], limit: int, offset: int = 0) -> list[dict[str, Any]]:
+        if table not in await self.table_names():
+            raise ValueError("нет такой таблицы")
+        real = {c["name"] for c in await self.table_columns(table)}
+        cols = [c for c in columns if c in real]
+        if not cols:
+            return []
+        select = ", ".join(f'"{c}"' for c in cols)  # имена колонок только из PRAGMA
+        return await self._all(f'SELECT {select} FROM "{table}" ORDER BY rowid DESC LIMIT ? OFFSET ?', (limit, offset))
+
+    async def table_update_row(self, table: str, row_id: int, column: str, value: Any) -> bool:
+        if table not in await self.table_names() or column not in {c["name"] for c in await self.table_columns(table)}:
+            raise ValueError("нет такой таблицы или колонки")
+        cur = await self._write(f'UPDATE "{table}" SET "{column}" = ? WHERE rowid = ?', (value, row_id))
+        return cur.rowcount > 0
+
+    # ---------- собственная таблица ассистента ----------
+
+    async def add_note(self, kind: str, text: str, now: str) -> int:
+        cur = await self._write(
+            "INSERT INTO agent_assistant_notes (created_at, kind, text) VALUES (?, ?, ?)", (now, kind, text)
+        )
+        return int(cur.lastrowid)
+
+    async def list_notes(self, kind: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        if kind:
+            return await self._all(
+                "SELECT * FROM agent_assistant_notes WHERE kind = ? ORDER BY id DESC LIMIT ?", (kind, limit)
+            )
+        return await self._all("SELECT * FROM agent_assistant_notes ORDER BY id DESC LIMIT ?", (limit,))
+
+    async def delete_note(self, note_id: int) -> bool:
+        cur = await self._write("DELETE FROM agent_assistant_notes WHERE id = ?", (note_id,))
+        return cur.rowcount > 0

@@ -78,7 +78,8 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
     """Процесс Кимо: прежний бот (задачи, расходы, статистика, оплата) + шина заданий + диспетчер."""
     agent = ctx.agent
     scoped = ScopedDB(ctx.system_db, agent.name, agent.allowed_tables)  # права Кимо на таблицы
-    secrets = SecretStore(scoped, crypto)  # type: ignore[arg-type]
+    # Значения секретов LLM-слою и ScopedDB недоступны; запись токенов и Click-токен — только кодом процесса
+    secrets = SecretStore(ctx.system_db, crypto)
     rates = RatesService(scoped)  # type: ignore[arg-type]
 
     dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx)

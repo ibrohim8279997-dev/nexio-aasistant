@@ -120,7 +120,7 @@ async def app(tmp_path, db, groq):
     await registry.seed_defaults()
     kimo = await registry.get("kimo")
     scoped = ScopedDB(db, kimo.name, kimo.allowed_tables)
-    secrets = SecretStore(scoped, Crypto(settings.encryption_key))
+    secrets = SecretStore(db, Crypto(settings.encryption_key))
     from bot.agents.bus import Bus
 
     ctx = AgentContext(agent=kimo, registry=registry, system_db=db, bus=Bus(db, "kimo"))

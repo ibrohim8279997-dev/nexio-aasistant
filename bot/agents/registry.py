@@ -31,6 +31,14 @@ class AgentConfig:
     enabled: bool = False
     bot_username: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
+    display: str | None = None  # колонка display_name
+    role_description: str = ""
+    access_role: str = "agent"  # admin | creator | agent — права хранятся в БД, не в коде
+    created_by: str | None = None
+    last_seen: str | None = None
+    status: str = "offline"
+    status_detail: dict[str, Any] = field(default_factory=dict)
+    last_error: str | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> AgentConfig:
@@ -45,11 +53,20 @@ class AgentConfig:
             enabled=bool(row.get("enabled")),
             bot_username=row.get("bot_username"),
             config=row.get("config") or {},
+            display=row.get("display_name"),
+            role_description=row.get("role_description") or row["role"],
+            access_role=row.get("access_role") or "agent",
+            created_by=row.get("created_by"),
+            last_seen=row.get("last_seen"),
+            status=row.get("status") or "offline",
+            status_detail=row.get("status_detail") or {},
+            last_error=row.get("last_error"),
         )
 
     @property
     def display_name(self) -> str:
-        return str(self.config.get("display_name") or self.name)
+        """Имя для людей. Технический идентификатор (name) не меняется никогда."""
+        return str(self.display or self.config.get("display_name") or self.name)
 
     @property
     def kind(self) -> str:
@@ -117,8 +134,10 @@ class Registry:
             if names and card["name"] not in names:
                 continue
             current = await self._db.get_agent(card["name"])
-            if current:
-                card = {**card, "enabled": current["enabled"], "bot_username": current["bot_username"]}
+            if current:  # живое состояние и принадлежность из файла не берём
+                keep = ("enabled", "bot_username", "created_by", "last_seen", "status", "status_detail", "last_error")
+                card = {**card, **{k: current[k] for k in keep}}
+                card["display_name"] = current.get("display_name") or card.get("display_name")
             await self._db.insert_agent(card, to_db(now_utc()), replace=True)
             synced.append(card["name"])
         return synced
