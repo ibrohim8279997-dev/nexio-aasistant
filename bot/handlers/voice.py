@@ -95,6 +95,8 @@ async def process_text(message: Message, text: str, bot: Bot, groq: GroqClient, 
         raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks, deps.identity))
         actions = parse_actions(raw, now_local().date(), agents)
     except GroqError as exc:
+        if deps.ctx is not None:
+            deps.ctx.state.set_error(f"Groq: {type(exc).__name__}")
         await send(message, exc.user_message)
         return
     except ActionParseError as exc:

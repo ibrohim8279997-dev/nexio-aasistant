@@ -19,6 +19,7 @@ async def db(tmp_path: Path):
 
 
 from bot.config import Settings  # noqa: E402
+from bot.timeutil import now_utc, to_db  # noqa: E402
 from bot.crypto import Crypto, SecretStore, generate_key  # noqa: E402
 
 ADMIN_ID = 1000
@@ -118,6 +119,9 @@ async def app(tmp_path, db, groq):
     settings = make_settings(tmp_path)
     registry = Registry(db)
     await registry.seed_defaults()
+    kimo = await registry.get("kimo")
+    for a in await registry.all():  # все агенты «живы»: свежий heartbeat
+        await db.agent_heartbeat(a.name, "online", to_db(now_utc()))
     kimo = await registry.get("kimo")
     scoped = ScopedDB(db, kimo.name, kimo.allowed_tables, live=True)
     secrets = SecretStore(db, Crypto(settings.encryption_key))

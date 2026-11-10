@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
@@ -16,6 +17,7 @@ from aiogram.enums import ParseMode
 
 from bot.agents.bus import Bus
 from bot.agents.context import AgentContext
+from bot.agents.health import AgentState, Heartbeat
 from bot.agents.registry import NAME_RE, AgentConfig, Registry
 from bot.ai.llm import make_llm
 from bot.config import BASE_DIR, ConfigError, Settings, load_settings
@@ -73,10 +75,15 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
         llm = make_llm(settings, agent.provider, agent.text_model, agent.stt_model)
         bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         bus = Bus(db, agent.name, owner_id=settings.admin_id, display=agent.display_name)
-        ctx = AgentContext(agent=agent, registry=registry, system_db=db, bus=bus)
+        state = AgentState(started_at=time.time())
+        ctx = AgentContext(agent=agent, registry=registry, system_db=db, bus=bus, state=state)
         interrupted = await db.queue_fail_interrupted(agent.name, _now())
         if interrupted:
             log.warning("Помечено прерванных заданий: %s", interrupted)
+        llm.on_rate_limit = rate_notifier(bot, settings.admin_id, agent.display_name)  # type: ignore[attr-defined]
+        heartbeat = Heartbeat(db, agent.name, state, llm)
+        await heartbeat.beat()  # сразу online: Кимо видит живой процесс, не дожидаясь первого интервала
+        heartbeat_task = asyncio.create_task(heartbeat.run())
         try:
             if agent.kind == "kimo":
                 from bot.main import run_kimo
@@ -87,11 +94,25 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
 
                 await run_generic(settings, ctx, llm, bot)
         finally:
+            heartbeat.stop()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
             await bot.session.close()
             await llm.close()
     finally:
         await db.close()
         log.info("Агент %s остановлен", name)
+
+
+def rate_notifier(bot: Bot, owner_id: int, display: str):
+    """Сообщение владельцу о лимите Groq (429): кто, сколько ждать, удалось ли выполнить запрос."""
+
+    async def notify(wait: float, exhausted: bool) -> None:
+        text = f"⏳ {display}: лимит Groq (429). Повтор запроса примерно через {int(wait)} с."
+        if exhausted:
+            text += " Этот запрос выполнить не удалось, попробуйте позже."
+        await bot.send_message(owner_id, text, parse_mode=None)
+
+    return notify
 
 
 def _now() -> str:

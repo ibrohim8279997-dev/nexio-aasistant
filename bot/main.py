@@ -13,6 +13,7 @@ from bot.agents.access import ScopedDB
 from bot.agents.bus import BusWorker
 from bot.agents.context import AgentContext
 from bot.agents.kimo import KimoBusHandler
+from bot.agents.watchdog import Watchdog
 from bot.ai.llm import LLMClient
 from bot.config import Settings
 from bot.crypto import Crypto, SecretStore
@@ -61,6 +62,8 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
     @dp.errors()
     async def on_error(event: ErrorEvent) -> bool:
         log.exception("Ошибка при обработке апдейта: %s", type(event.exception).__name__, exc_info=event.exception)
+        if deps.get("agent_ctx") is not None:
+            deps["agent_ctx"].state.set_error(f"{type(event.exception).__name__} при обработке сообщения")
         update = event.update
         try:
             if update.message:
@@ -74,6 +77,18 @@ def build_dispatcher(settings: Settings, **deps: Any) -> Dispatcher:
     return dp
 
 
+def make_notifier(bot: Bot, owner_id: int):
+    """Сообщение владельцу в личку (watchdog и проверки живости)."""
+
+    async def notify(text: str, target: Any = None) -> None:
+        try:
+            await bot.send_message(owner_id, text, parse_mode=None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось отправить владельцу сообщение: %s", type(exc).__name__)
+
+    return notify
+
+
 async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: Bot, crypto: Crypto) -> None:
     """Процесс Кимо: прежний бот (задачи, расходы, статистика, оплата) + шина заданий + диспетчер."""
     agent = ctx.agent
@@ -84,8 +99,10 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
 
     dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx)
     scheduler = BotScheduler(bot, scoped, settings, system_db=ctx.system_db)  # type: ignore[arg-type]
-    worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings), bot, settings.admin_id)
+    worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings), bot, settings.admin_id, state=ctx.state)
+    watchdog = Watchdog(ctx.system_db, ctx.registry, make_notifier(bot, settings.admin_id), own_agent=agent.name)
     worker_task: asyncio.Task[None] | None = None
+    watchdog_task: asyncio.Task[None] | None = None
     try:
         scheduler.start()
         try:
@@ -99,12 +116,15 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось получить данные бота: %s", type(exc).__name__)
         worker_task = asyncio.create_task(worker.run())
+        watchdog_task = asyncio.create_task(watchdog.run())
         log.info("Кимо запущен (long polling)")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         worker.stop()
-        if worker_task:
-            await asyncio.gather(worker_task, return_exceptions=True)
+        watchdog.stop()
+        for task in (worker_task, watchdog_task):
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
         scheduler.shutdown()
         await rates.close()
 

@@ -147,6 +147,10 @@ MIGRATIONS: list[str] = [
     UPDATE agents SET allowed_tables = (SELECT json_group_array(value) FROM json_each(allowed_tables) WHERE value <> 'secrets')
      WHERE name = 'kimo' AND json_valid(allowed_tables);
 
+    -- таймаут задания для ассистента (веб-поиск дольше обычного), остальные — 60 с по умолчанию
+    UPDATE agents SET config = json_set(config, '$.task_timeout_s', 180)
+     WHERE name = 'assistant' AND json_valid(config) AND json_extract(config, '$.task_timeout_s') IS NULL;
+
     -- собственная таблица ассистента
     CREATE TABLE IF NOT EXISTS agent_assistant_notes (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,

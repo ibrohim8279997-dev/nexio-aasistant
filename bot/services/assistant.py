@@ -29,6 +29,8 @@ from bot.services import tracker
 from bot.agents import builder_flow
 from bot.agents.bus import BusError, DepthExceeded
 from bot.agents.cards import card_text
+from bot.agents.health import effective_status
+from bot.agents.watchdog import format_offline
 from bot.services.rates import RatesService
 from bot.timeutil import TZ, from_db, now_local, now_utc, to_db
 
@@ -52,6 +54,7 @@ class AssistantDeps:
     reply_to: int | None = None
     is_group: bool = False
     is_owner: bool = False
+    offer_restart: Any = None  # async (AgentConfig, text) -> Answer: предложить перезапуск с подтверждением
 
 
 async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
@@ -140,6 +143,12 @@ async def _delegate(action: Delegate, deps: AssistantDeps) -> Answer:
     target = await ctx.registry.find(action.agent, enabled_only=True)  # по display_name и по agent_id
     if target is None or target.name == ctx.agent.name:
         return Answer("❓ Не нашёл подходящего агента. Кому передать задачу?")
+    # перед передачей проверяем heartbeat: offline-агенту задание не ставим, сразу говорим причину
+    if effective_status(target.last_seen, target.status) == "offline":
+        text = f"⚠️ {format_offline(target)}.\nЗадание не передано."
+        if deps.offer_restart is not None:
+            return await deps.offer_restart(target, text)
+        return Answer(text + f"\nЗапустить агента: /agenton {target.name}")
     context = {
         "from": ctx.agent.name, "from_name": ctx.agent.display_name, "owner_request": action.task[:500],
         "about": action.task[:300], "need": f"выполнить задачу владельца: {action.task[:300]}",

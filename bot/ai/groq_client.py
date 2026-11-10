@@ -9,6 +9,7 @@ import logging
 import re
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -169,9 +170,22 @@ class GroqClient:
         self._stt_window = RateWindow(*STT_LIMITS)
         self._tokens = TokenWindow(*TOKEN_LIMITS)
         self.last_limits: dict[str, str] = {}
+        self.rate_limit_until = 0.0  # unix-время, до которого действует 429 (heartbeat пишет busy/rate_limit)
+        self.on_rate_limit: Callable[[float, bool], Awaitable[None]] | None = None  # уведомить владельца
+        self._notified_at = 0.0
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    async def _notify_rate_limit(self, wait: float, exhausted: bool) -> None:
+        """Сообщить владельцу о лимите Groq (не чаще раза в 5 минут), ошибки уведомления не мешают запросу."""
+        if self.on_rate_limit is None or time.time() - self._notified_at < 300:
+            return
+        self._notified_at = time.time()
+        try:
+            await self.on_rate_limit(wait, exhausted)
+        except Exception:  # noqa: BLE001
+            log.warning("Не удалось уведомить о лимите Groq")
 
     async def _reserve_tokens(self) -> None:
         """Перед текстовым запросом: свой учёт токенов и остаток по заголовкам Groq (общий на все процессы)."""
@@ -213,6 +227,8 @@ class GroqClient:
             if response.status_code == 429:
                 wait = _retry_after(response) or float(2**attempt)
                 log.warning("Groq 429 на %s, retry-after=%.1f (попытка %s)", url, wait, attempt)
+                self.rate_limit_until = time.time() + wait
+                await self._notify_rate_limit(wait, attempt == MAX_RETRIES or wait > MAX_RETRY_WAIT)
                 if wait > MAX_RETRY_WAIT or attempt == MAX_RETRIES:
                     raise GroqRateLimitError(wait, daily=wait > 3600)
                 await asyncio.sleep(wait)
@@ -227,6 +243,7 @@ class GroqClient:
                 if response.status_code in (401, 403):
                     raise GroqUnavailableError("auth")
                 raise GroqBadResponseError(f"HTTP {response.status_code}", status=response.status_code)
+            self.rate_limit_until = 0.0
             self.last_limits = {k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")}
             try:
                 return response.json()

@@ -236,6 +236,7 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
         try:
             answer = await agent.answer(text[:MAX_TEXT_LEN], chat=(message.chat.id, message.message_id))
         except GroqError as exc:
+            agent.ctx.state.set_error(f"Groq: {type(exc).__name__}")
             answer = exc.user_message
         for i, part in enumerate(chunks(answer)):
             if i == 0:
@@ -301,9 +302,10 @@ async def run_generic(settings: Settings, ctx: AgentContext, llm: LLMClient, bot
     @dp.errors()
     async def on_error(event: ErrorEvent) -> bool:
         log.exception("Ошибка агента %s: %s", agent.name, type(event.exception).__name__, exc_info=event.exception)
+        ctx.state.set_error(f"{type(event.exception).__name__} при обработке сообщения")
         return True
 
-    worker = BusWorker(ctx.bus, agent.handle_task, bot, settings.admin_id)
+    worker = BusWorker(ctx.bus, agent.handle_task, bot, settings.admin_id, state=ctx.state)
     worker_task = asyncio.create_task(worker.run())
     try:
         log.info("Агент %s (@%s) запущен", agent.name, me.username)

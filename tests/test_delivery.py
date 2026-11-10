@@ -1,13 +1,11 @@
 """Очередь: контекст, чат владельца, доставка результата отправителем (один раз), failed вместо вопроса, depth."""
 import asyncio
-import json
 
 import pytest
 
 from bot.agents.access import ScopedDB
 from bot.agents.bus import MAX_DEPTH, Bus, BusError, BusWorker, DepthExceeded
 from bot.agents.context import AgentContext
-from bot.agents.generic import GenericAgent
 from bot.agents.kimo import KimoBusHandler
 from bot.agents.registry import Registry
 from tests.conftest import ADMIN_ID, FakeGroq, FakeRates, make_settings
