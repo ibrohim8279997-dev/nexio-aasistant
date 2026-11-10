@@ -16,6 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from bot.agents.bus import Bus
+from bot.agents.access import ScopedDB
 from bot.agents.context import AgentContext
 from bot.agents.health import AgentState, Heartbeat
 from bot.agents.registry import NAME_RE, AgentConfig, Registry
@@ -79,6 +80,10 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
         bus = Bus(db, agent.name, owner_id=settings.admin_id, display=agent.display_name)
         state = AgentState(started_at=time.time())
         ctx = AgentContext(agent=agent, registry=registry, system_db=db, bus=bus, state=state)
+        ctx.data = ScopedDB(db, agent.name, agent.allowed_tables, agent.access_role, live=True)  # права из БД при каждом запросе
+        log.info("Агент %s: провайдер %s, текстовая модель %s, Whisper %s, веб-поиск %s (SEARCH_ENABLED=%s)",
+                 agent.name, agent.provider, agent.text_model, agent.stt_model or "нет",
+                 "включён" if agent.search and settings.search_enabled else "выключен", settings.search_enabled)
         interrupted = await db.queue_fail_interrupted(agent.name, _now())
         if interrupted:
             log.warning("Помечено прерванных заданий: %s", interrupted)

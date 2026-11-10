@@ -24,7 +24,7 @@ from bot.agents.bus import BusError, BusWorker, DepthExceeded, chunks, plain_tex
 from bot.agents.cards import CardError, builder_messages, parse_card
 from bot.agents.context import AgentContext
 from bot.agents.registry import TOKEN_RE, norm_name
-from bot.ai.groq_client import GroqError
+from bot.ai.groq_client import GroqError, GroqSearchError
 from bot.ai.llm import LLMClient
 from bot.config import Settings
 from bot.middlewares import ThrottlingMiddleware
@@ -40,7 +40,7 @@ _CITATION_RE = re.compile(r"【[^】]*】")
 class Plan(BaseModel):
     model_config = {"extra": "ignore", "str_strip_whitespace": True}
 
-    action: Literal["answer", "search", "ask_agent"]
+    action: Literal["answer", "search", "ask_agent", "remember"]
     text: str | None = Field(default=None, max_length=6000)
     query: str | None = Field(default=None, max_length=500)
     agent: str | None = None
@@ -60,7 +60,7 @@ def parse_plan(raw: str, allowed_agents: set[str], search_allowed: bool) -> Plan
         plan = Plan.model_validate(json.loads(text[start : end + 1]))
     except (ValueError, ValidationError) as exc:
         raise PlanError(type(exc).__name__) from exc
-    if plan.action == "answer" and not plan.text:
+    if plan.action in ("answer", "remember") and not plan.text:
         raise PlanError("пустой ответ")
     if plan.action == "search":
         if not search_allowed:
@@ -77,8 +77,11 @@ PLAN_PROMPT = """{identity}
 Сейчас: {now}.
 Реши, как ответить владельцу. Верни ТОЛЬКО JSON одного из видов:
 {{"action": "answer", "text": "готовый ответ"}}
-{search_line}{{"action": "ask_agent", "agent": "<имя или системное имя агента>", "question": "что спросить, с контекстом"}} — если нужны данные, которые ведёт другой агент (например, задачи, напоминания, статусы и ошибки агентов — у Кимо).
-Отвечай на языке владельца. Не выдумывай факты."""
+{search_line}{notes_line}{{"action": "ask_agent", "agent": "<имя или системное имя агента>", "question": "что спросить, с контекстом"}} — если нужны данные, которые ведёт другой агент (например, задачи, напоминания, статусы и ошибки агентов — у Кимо).
+Отвечай на языке владельца. Не выдумывай факты. Вопросы про текущие события, новости, цены, курсы, погоду, а также всё, в чём ты не уверен, решай через search, а не из памяти.{notes}"""
+
+NOTES_LINE = '{"action": "remember", "text": "что запомнить"} — если владелец просит запомнить заметку.\n'
+NOTES_TABLE = "agent_assistant_notes"  # собственная таблица ассистента (миграция 3)
 
 SEARCH_LINE = '{"action": "search", "query": "поисковый запрос"} — если нужны свежие факты из интернета.\n'
 
@@ -117,8 +120,11 @@ class GenericAgent:
     async def answer(self, text: str, depth: int = 0, chat: tuple[int | None, int | None] = (None, None)) -> str:
         identity = await self.ctx.identity()
         others = await self.ctx.registry.aliases(exclude=self.name)
+        notes = await self._notes()
         system = PLAN_PROMPT.format(
-            identity=identity, now=context_now_text(), search_line=SEARCH_LINE if self.search_allowed else ""
+            identity=identity, now=context_now_text(), search_line=SEARCH_LINE if self.search_allowed else "",
+            notes_line=NOTES_LINE if self.has_notes else "",
+            notes=("\nЗаметки владельца (последние):\n" + notes) if notes else "",
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": text}]
         raw = (await self.llm.chat(messages, json_mode=True, agent=self.name)).content
@@ -130,6 +136,8 @@ class GenericAgent:
 
         if plan.action == "answer":
             return plan.text or ""
+        if plan.action == "remember":
+            return await self._remember(plan.text or "")
         if plan.action == "search":
             return await self._search(identity, text, plan.query or text)
         target = await self.ctx.registry.find(plan.agent or "", enabled_only=True)
@@ -160,6 +168,29 @@ class GenericAgent:
             return float(target.config.get("task_timeout_s", 60)) + 5.0
         except (TypeError, ValueError):
             return 65.0
+
+    @property
+    def has_notes(self) -> bool:
+        return self.ctx.data is not None and NOTES_TABLE in self.ctx.agent.allowed_tables
+
+    async def _notes(self) -> str:
+        """Последние заметки из собственной таблицы агента (если она ему выдана)."""
+        if not self.has_notes:
+            return ""
+        try:
+            rows = await self.ctx.data.list_notes(limit=10)
+        except Exception:  # noqa: BLE001 — заметки необязательны, сбой БД не должен ломать ответ
+            log.warning("Не удалось прочитать заметки")
+            return ""
+        return "\n".join(f"- {r['text']}" for r in reversed(rows))
+
+    async def _remember(self, text: str) -> str:
+        if not self.has_notes:
+            return "У меня нет таблицы для заметок."
+        from bot.timeutil import now_utc, to_db
+
+        await self.ctx.data.add_note("note", text[:500], to_db(now_utc()))
+        return "📝 Запомнил."
 
     async def answer_admin(self, text: str, chat: tuple[int | None, int | None] = (None, None)) -> str:
         """Прямой разговор владельца с Мимо: отчёты и управление агентами, созданными им самим."""
@@ -198,10 +229,18 @@ class GenericAgent:
             f"Найди ответ в интернете. Сделай не больше {self.max_searches} поисков. "
             "Ответь кратко, на языке владельца, в конце укажи 1-3 источника (домены)."
         )
-        result = await self.llm.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": f"{text}\n\nПоисковый запрос: {query}"}],
-            search=True, max_tokens=3000, agent=self.name,
-        )
+        try:
+            result = await self.llm.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": f"{text}\n\nПоисковый запрос: {query}"}],
+                search=True, max_tokens=3000, agent=self.name,
+            )
+        except GroqSearchError as exc:
+            log.error("Веб-поиск не сработал (%s): отвечаю без поиска", exc)
+            self.ctx.state.set_error("Веб-поиск Groq недоступен")
+            answer = await self._final(identity, text, "")
+            return "🔎 Веб-поиск сейчас недоступен, отвечаю без него.\n\n" + answer
+        if result.searches > self.max_searches:
+            log.warning("Поисков за запрос: %s при лимите %s", result.searches, self.max_searches)
         return _CITATION_RE.sub("", result.content).strip()
 
     async def _final(self, identity: str, text: str, data: str) -> str:

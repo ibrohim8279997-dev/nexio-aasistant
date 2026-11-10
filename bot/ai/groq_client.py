@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -20,7 +22,7 @@ usage_log = logging.getLogger("usage")  # отдельный файл logs/usage
 
 BASE_URL = "https://api.groq.com/openai/v1"
 MAX_AUDIO_BYTES = 25 * 1024 * 1024  # лимит Groq на файл
-MAX_RETRIES = 3
+MAX_RETRIES = 3  # 1 запрос + до 2 повторов на 429 (пауза по retry-after)
 MAX_RETRY_WAIT = 20.0  # дольше не ждём внутри запроса пользователя
 
 # Лимиты бесплатного тарифа Groq (с запасом не превышаем их сами)
@@ -66,6 +68,16 @@ class SttDisabledError(GroqError):
     user_message = "🎙 Этот агент не принимает голосовые. Напишите текстом."
 
 
+class GroqSearchError(GroqError):
+    """Веб-поиск (browser_search) не сработал: код ответа Groq в status, текст — в логе."""
+
+    user_message = "🔎 Веб-поиск Groq сейчас недоступен."
+
+    def __init__(self, message: str = "", status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class AudioTooLargeError(GroqError):
     user_message = "Файл слишком большой (максимум 25 МБ)."
 
@@ -99,6 +111,37 @@ class RateWindow:
         now = time.monotonic() if now is None else now
         self._minute.append(now)
         self._day.append(now)
+
+
+class SharedLimits:
+    """Остаток токенов Groq, общий для всех процессов агентов (ключ один, лимит 8K токенов в минуту на всех).
+
+    Каждый процесс после ответа записывает в небольшой JSON-файл остаток и время сброса из заголовков x-ratelimit-*,
+    перед запросом читает его. Записываются только числа, без секретов."""
+
+    def __init__(self, path: Any) -> None:
+        self.path = path
+
+    def write(self, remaining_tokens: int, reset_seconds: float | None) -> None:
+        try:
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"remaining": remaining_tokens, "ts": time.time(),
+                           "reset_at": time.time() + (reset_seconds or 60.0)}, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass  # общий лимит — оптимизация, не должен ронять запрос
+
+    def wait_seconds(self, low: int = 800, now: float | None = None) -> float:
+        now = time.time() if now is None else now
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return 0.0
+        if now - float(data.get("ts", 0)) > 60 or int(data.get("remaining", 10**9)) >= low:
+            return 0.0
+        return max(float(data.get("reset_at", 0)) - now, 0.0)
 
 
 class TokenWindow:
@@ -158,7 +201,9 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 
 class GroqClient:
-    def __init__(self, api_key: str, text_model: str, stt_model: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, api_key: str, text_model: str, stt_model: str, client: httpx.AsyncClient | None = None,
+                 shared_path: Any = None) -> None:
+        self.shared = SharedLimits(shared_path) if shared_path else None
         self.text_model = text_model
         self.stt_model = stt_model
         self._http = client or httpx.AsyncClient(
@@ -192,6 +237,8 @@ class GroqClient:
         wait, daily = self._tokens.wait_time()
         if daily:
             raise GroqRateLimitError(wait, daily=True)
+        if not wait and self.shared is not None:  # другие агенты уже выбрали минутный лимит
+            wait = self.shared.wait_seconds(LOW_TOKENS_LEFT)
         remaining = self.last_limits.get("x-ratelimit-remaining-tokens")
         if not wait and remaining and remaining.isdigit() and int(remaining) < LOW_TOKENS_LEFT:
             wait = parse_reset(self.last_limits.get("x-ratelimit-reset-tokens")) or 0.0
@@ -245,6 +292,9 @@ class GroqClient:
                 raise GroqBadResponseError(f"HTTP {response.status_code}", status=response.status_code)
             self.rate_limit_until = 0.0
             self.last_limits = {k: v for k, v in response.headers.items() if k.startswith("x-ratelimit-")}
+            left = self.last_limits.get("x-ratelimit-remaining-tokens", "")
+            if self.shared is not None and left.isdigit():
+                self.shared.write(int(left), parse_reset(self.last_limits.get("x-ratelimit-reset-tokens")))
             try:
                 return response.json()
             except ValueError as exc:
@@ -285,12 +335,29 @@ class GroqClient:
         try:
             data = await self._post("/chat/completions", self._text_window, json=payload)
         except GroqBadResponseError as exc:
-            if exc.status != 400 or "response_format" not in payload:
+            if search and exc.status in (400, 404, 422):
+                data = await self._retry_search(payload, exc)
+            elif exc.status != 400 or "response_format" not in payload:
                 raise
-            # Модель из конфига может не поддерживать JSON-режим — повторяем без него, JSON всё равно проверим
-            payload.pop("response_format", None)
-            payload.pop("reasoning_effort", None)
-            data = await self._post("/chat/completions", self._text_window, json=payload)
+            else:
+                # Модель из конфига может не поддерживать JSON-режим — повторяем без него, JSON всё равно проверим
+                payload.pop("response_format", None)
+                payload.pop("reasoning_effort", None)
+                data = await self._post("/chat/completions", self._text_window, json=payload)
+        return self._finish_chat(data, agent, search)
+
+    async def _retry_search(self, payload: dict[str, Any], first: GroqBadResponseError) -> dict[str, Any]:
+        """browser_search отклонён: один повтор без tool_choice, дальше понятная ошибка (причина записана в лог)."""
+        log.error("Groq отклонил browser_search (код %s). Модель: %s. Повторяю без tool_choice", first.status, self.text_model)
+        retry = {k: v for k, v in payload.items() if k != "tool_choice"}
+        try:
+            return await self._post("/chat/completions", self._text_window, json=retry)
+        except GroqBadResponseError as exc:
+            log.error("Веб-поиск не сработал и без tool_choice (код %s). Проверьте, что модель поддерживает browser_search "
+                      "и поиск включён для вашей организации Groq", exc.status)
+            raise GroqSearchError(f"browser_search: HTTP {exc.status}", status=exc.status) from exc
+
+    def _finish_chat(self, data: dict[str, Any], agent: str, search: bool) -> ChatResult:
         try:
             message = data["choices"][0]["message"]
             content = message.get("content")

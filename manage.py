@@ -163,6 +163,41 @@ def cmd_agents(args: argparse.Namespace) -> int:
     return asyncio.run(_with_db(run))
 
 
+def cmd_check_search(args: argparse.Namespace) -> int:
+    """Один запрос с browser_search: код ответа, причина ошибки (без ключей), usage и остаток лимитов."""
+    from bot.ai.groq_client import GroqClient, GroqError
+    from bot.config import load_settings
+    from bot.logging_setup import redact_text
+
+    settings = load_settings()
+    model = args.model or settings.text_model or "openai/gpt-oss-120b"
+
+    async def run() -> int:
+        client = GroqClient(settings.groq_api_key, model, "")
+        try:
+            result = await client.chat(
+                [{"role": "user", "content": "Какой сегодня курс доллара к суму по данным ЦБ Узбекистана? Ответь одной строкой."}],
+                search=True, max_tokens=1500, agent="check-search",
+            )
+        except GroqError as exc:
+            print(f"✖ Поиск не сработал: {type(exc).__name__}: {redact_text(str(exc))} — {exc.user_message}")
+            print("Подробности: logs/ (строка «Groq ...» с кодом и сообщением API без ключей).")
+            return 1
+        finally:
+            await client.close()
+        print(f"✔ Поиск работает. Модель: {model}. Поисков за запрос: {result.searches}")
+        print(f"  usage: {result.usage}")
+        print(f"  остаток: токенов {result.limits.get('x-ratelimit-remaining-tokens')}, запросов {result.limits.get('x-ratelimit-remaining-requests')}")
+        print("  ответ:", redact_text(result.content)[:300])
+        return 0
+
+    try:
+        return asyncio.run(run())
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Служебные команды бота")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -171,6 +206,9 @@ def main() -> int:
     p_db.add_argument("arg", nargs="?")
     p_db.add_argument("--yes", action="store_true")
     p_db.set_defaults(func=cmd_db)
+    p_cs = sub.add_parser("check-search", help="проверить веб-поиск Groq (browser_search) боевым ключом")
+    p_cs.add_argument("--model", default=None, help="модель (по умолчанию TEXT_MODEL или openai/gpt-oss-120b)")
+    p_cs.set_defaults(func=cmd_check_search)
     p_ag = sub.add_parser("agents")
     p_ag.add_argument("action", choices=["list", "enabled", "show", "enable", "disable", "sync", "add", "set-token", "rename"])
     p_ag.add_argument("arg", nargs="?")

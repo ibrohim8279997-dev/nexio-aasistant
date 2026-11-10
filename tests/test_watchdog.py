@@ -48,7 +48,7 @@ def test_effective_status_offline_after_90s():
 
 
 async def test_heartbeat_writes_status_and_error_without_secrets(db):
-    reg = await setup_midi(db)
+    await setup_midi(db)
     state = AgentState()
     state.set_error("Groq 401 для ключа gsk_" + "a" * 20 + " и токена 7123456789:AAH" + "x" * 32)
     hb = Heartbeat(db, "midi", state, llm=type("L", (), {"rate_limit_until": 0.0})())
@@ -136,7 +136,7 @@ async def test_taken_task_of_dead_agent_fails(db):
 
 
 async def test_late_result_of_closed_task_is_dropped(db):
-    reg = await setup_midi(db)
+    await setup_midi(db)
     bus = Bus(db, "kimo", owner_id=ADMIN_ID)
     task_id = await bus.send("midi", {"type": "ask", "text": "x"})
     midi = Bus(db, "midi")

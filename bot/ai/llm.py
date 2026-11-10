@@ -28,7 +28,8 @@ class LLMClient(Protocol):
 
 
 def _groq(settings: Settings, text_model: str, stt_model: str) -> GroqClient:
-    return GroqClient(settings.groq_api_key, text_model, stt_model)
+    # один ключ на всех агентов: остаток токенов в минуту общий, поэтому процессы обмениваются им через файл
+    return GroqClient(settings.groq_api_key, text_model, stt_model, shared_path=settings.db_path.parent / "groq_shared.json")
 
 
 PROVIDERS: dict[str, Any] = {"groq": _groq}
