@@ -34,7 +34,9 @@ async def test_send_validation(db):
 
 async def test_worker_replies_in_chat_from_own_bot(db):
     sender, receiver = Bus(db, "kimo"), Bus(db, "assistant")
-    task_id = await sender.send("assistant", {"type": "ask", "text": "q"}, chat_id=-100, reply_to=42)
+    task_id = await sender.send(
+        "assistant", {"type": "ask", "text": "q", "deliver_by": "receiver"}, chat_id=-100, reply_to=42
+    )
 
     async def handler(task):
         return "ответ ассистента"
@@ -121,7 +123,7 @@ async def test_assistant_asks_kimo_for_reminders(app, db, tmp_path):
     dp, bot, settings = app
     reg = Registry(db)
     kimo_cfg = await reg.get("kimo")
-    kimo_db = ScopedDB(db, "kimo", kimo_cfg.allowed_tables)
+    kimo_db = ScopedDB(db, "kimo", kimo_cfg.allowed_tables, live=True)
     kimo_llm = FakeGroq()
     kimo_llm.replies.append('{"actions":[{"type":"add_expense","amount":5,"currency":"USD"},{"type":"list_tasks","day":"today"}]}')
     owner = await kimo_db.ensure_user(ADMIN_ID, "2026-11-08 00:00:00")

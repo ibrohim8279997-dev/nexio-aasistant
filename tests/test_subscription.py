@@ -80,7 +80,7 @@ async def test_subscription_disabled_flag(tmp_path, db, groq):
     reg = Registry(db)
     await reg.seed_defaults()
     kimo = await reg.get("kimo")
-    scoped = ScopedDB(db, "kimo", kimo.allowed_tables)
+    scoped = ScopedDB(db, "kimo", kimo.allowed_tables, live=True)
     dp = build_dispatcher(
         settings, db=scoped, secrets=SecretStore(db, Crypto(settings.encryption_key)), groq=groq,
         rates=FakeRates(scoped), agent_ctx=AgentContext(kimo, reg, db),

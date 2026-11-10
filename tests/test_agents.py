@@ -13,7 +13,7 @@ def test_default_cards_valid():
 
 
 def test_can_access_rules():
-    assert can_access("kimo", ["expenses"], "expenses")
+    assert can_access("kimo", ["expenses"], "expenses", "admin")
     assert not can_access("assistant", ["expenses"], "expenses")  # расходы только у Кимо, даже если в конфиге
     assert not can_access("staff_bot", [], "tasks")  # по умолчанию ничего
     assert can_access("staff_bot", [], "agent_staff_bot_kb")  # свои таблицы
@@ -21,7 +21,7 @@ def test_can_access_rules():
 
 
 async def test_scoped_db_enforces_tables(db):
-    kimo = ScopedDB(db, "kimo", ["users", "tasks", "expenses"])
+    kimo = ScopedDB(db, "kimo", ["users", "tasks", "expenses"], role="admin")
     user = await kimo.get_or_create_user(1, None, "A", NOW)
     await kimo.add_expense(user["id"], 1000, "UZS", "Еда", None, None, NOW)
 

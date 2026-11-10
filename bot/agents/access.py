@@ -10,12 +10,11 @@ from typing import Any
 
 from bot.db import Database
 
-# Таблицы, доступ к которым жёстко ограничен независимо от конфига агента
-RESTRICTED_TABLES: dict[str, set[str]] = {
-    "expenses": {"kimo"},
-    "payments": {"kimo"},
-    "secrets": {"kimo"},
-}
+# Таблицы, доступ к которым ограничен независимо от списка allowed_tables в конфиге агента.
+# Расходы и платежи видит только роль admin (роль хранится в таблице agents, а не в коде).
+RESTRICTED_TABLES: frozenset[str] = frozenset({"expenses", "payments"})
+# Значения секретов не видит никто через слой данных: ни агент, ни admin (имена — только через AdminOps).
+HARD_DENIED_TABLES: frozenset[str] = frozenset({"secrets"})
 
 # Метод Database -> таблицы, которые он читает или пишет
 METHOD_TABLES: dict[str, frozenset[str]] = {
@@ -37,11 +36,11 @@ METHOD_TABLES: dict[str, frozenset[str]] = {
         "delete_expense": ["expenses"], "count_expenses": ["expenses"],
         # payments
         "add_payment": ["payments"], "payments_summary": ["payments"],
-        # secrets
-        "set_secret": ["secrets"], "get_secret": ["secrets"], "secret_names": ["secrets"],
-        "delete_secret": ["secrets"],
         # rates_cache
         "save_rate": ["rates_cache"], "last_rate": ["rates_cache"],
+        # собственная таблица ассистента
+        "add_note": ["agent_assistant_notes"], "list_notes": ["agent_assistant_notes"],
+        "delete_note": ["agent_assistant_notes"],
     }.items()
 }
 
@@ -50,32 +49,55 @@ class AccessDenied(PermissionError):
     """Агенту запрещён доступ к таблице."""
 
 
-def can_access(agent: str, allowed_tables: Iterable[str], table: str) -> bool:
+def can_access(agent: str, allowed_tables: Iterable[str], table: str, role: str = "agent") -> bool:
+    if table in HARD_DENIED_TABLES:
+        return False
     if table.startswith(f"agent_{agent}_"):
         return True  # собственные таблицы агента
-    if table in RESTRICTED_TABLES and agent not in RESTRICTED_TABLES[table]:
+    if table in RESTRICTED_TABLES and role != "admin":
         return False
     return table in set(allowed_tables)
 
 
 class ScopedDB:
-    def __init__(self, db: Database, agent: str, allowed_tables: Iterable[str]) -> None:
+    """Доступ агента к данным. live=True: роль и список таблиц читаются из таблицы agents при каждом запросе,
+    поэтому отзыв прав действует сразу, без перезапуска процесса."""
+
+    def __init__(self, db: Database, agent: str, allowed_tables: Iterable[str], role: str = "agent",
+                 live: bool = False) -> None:
         self._db = db
         self._agent = agent
         self._allowed = frozenset(allowed_tables)
+        self._role = role
+        self._live = live
 
     @property
     def agent(self) -> str:
         return self._agent
 
-    def allows(self, table: str) -> bool:
-        return can_access(self._agent, self._allowed, table)
+    async def current(self) -> tuple[str, frozenset[str]]:
+        if not self._live:
+            return self._role, self._allowed
+        row = await self._db.get_agent(self._agent)
+        if row is None:
+            return "agent", frozenset()  # агента нет в реестре — прав нет
+        return row.get("access_role") or "agent", frozenset(row.get("allowed_tables") or [])
+
+    async def allows(self, table: str) -> bool:
+        role, allowed = await self.current()
+        return can_access(self._agent, allowed, table, role)
 
     def __getattr__(self, name: str) -> Any:
         tables = METHOD_TABLES.get(name)
         if tables is None:
             raise AccessDenied(f"Агенту {self._agent} недоступен метод БД {name}")
-        denied = sorted(t for t in tables if not self.allows(t))
-        if denied:
-            raise AccessDenied(f"Агенту {self._agent} запрещён доступ к таблицам: {', '.join(denied)}")
-        return getattr(self._db, name)
+        method = getattr(self._db, name)
+
+        async def guarded(*args: Any, **kwargs: Any) -> Any:
+            role, allowed = await self.current()
+            denied = sorted(t for t in tables if not can_access(self._agent, allowed, t, role))
+            if denied:
+                raise AccessDenied(f"Агенту {self._agent} запрещён доступ к таблицам: {', '.join(denied)}")
+            return await method(*args, **kwargs)
+
+        return guarded

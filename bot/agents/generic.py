@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from bot.agents.bus import BusError, BusWorker, DepthExceeded, chunks
 from bot.agents.cards import CardError, builder_messages, parse_card
 from bot.agents.context import AgentContext
-from bot.agents.registry import TOKEN_RE
+from bot.agents.registry import TOKEN_RE, norm_name
 from bot.ai.groq_client import GroqError
 from bot.ai.llm import LLMClient
 from bot.config import Settings
@@ -67,7 +67,7 @@ def parse_plan(raw: str, allowed_agents: set[str], search_allowed: bool) -> Plan
             raise PlanError("поиск выключен")
         if not plan.query:
             raise PlanError("нет запроса для поиска")
-    if plan.action == "ask_agent" and (plan.agent not in allowed_agents or not plan.question):
+    if plan.action == "ask_agent" and (norm_name(plan.agent) not in allowed_agents or not plan.question):
         raise PlanError("неизвестный агент")
     return plan
 
@@ -77,7 +77,7 @@ PLAN_PROMPT = """{identity}
 Сейчас: {now}.
 Реши, как ответить владельцу. Верни ТОЛЬКО JSON одного из видов:
 {{"action": "answer", "text": "готовый ответ"}}
-{search_line}{{"action": "ask_agent", "agent": "<системное имя>", "question": "что спросить"}} — если нужны данные, которые ведёт другой агент (например, задачи и напоминания — у kimo).
+{search_line}{{"action": "ask_agent", "agent": "<имя или системное имя агента>", "question": "что спросить, с контекстом"}} — если нужны данные, которые ведёт другой агент (например, задачи, напоминания, статусы и ошибки агентов — у Кимо).
 Отвечай на языке владельца. Не выдумывай факты."""
 
 SEARCH_LINE = '{"action": "search", "query": "поисковый запрос"} — если нужны свежие факты из интернета.\n'
@@ -101,9 +101,9 @@ class GenericAgent:
     def max_searches(self) -> int:
         return max(1, min(int(self.ctx.agent.config.get("max_searches", 2)), 5))
 
-    async def answer(self, text: str, depth: int = 0) -> str:
+    async def answer(self, text: str, depth: int = 0, chat: tuple[int | None, int | None] = (None, None)) -> str:
         identity = await self.ctx.identity()
-        others = {a.name for a in await self.ctx.registry.others(self.name)}
+        others = await self.ctx.registry.aliases(exclude=self.name)
         system = PLAN_PROMPT.format(
             identity=identity, now=context_now_text(), search_line=SEARCH_LINE if self.search_allowed else ""
         )
@@ -119,13 +119,34 @@ class GenericAgent:
             return plan.text or ""
         if plan.action == "search":
             return await self._search(identity, text, plan.query or text)
+        target = await self.ctx.registry.find(plan.agent or "", enabled_only=True)
+        if target is None or target.name == self.name:
+            return await self._final(identity, text, "")
+        context = {  # кто спрашивает, о чём и что нужно — иначе исполнитель вынужден переспрашивать
+            "from": self.name,
+            "from_name": self.ctx.agent.display_name,
+            "owner_request": text[:500],
+            "about": (plan.question or "")[:300],
+            "need": f"данные агента {target.display_name}: {(plan.question or '')[:300]}",
+        }
         try:
-            data = await self.ctx.bus.ask(plan.agent, plan.question, depth=depth + 1)
+            data = await self.ctx.bus.ask(
+                target.name, plan.question or text, depth=depth + 1, chat_id=chat[0], reply_to=chat[1],
+                timeout=self.ask_timeout(target), context=context,
+            )
         except DepthExceeded as exc:
             return str(exc)
         except BusError as exc:
-            return f"⚠️ Не получил данные от {plan.agent}: {exc}"
-        return await self._final(identity, text, f"Данные от агента {plan.agent}:\n{data}")
+            return f"⚠️ Не получил данные от {target.display_name}: {exc}"
+        return await self._final(identity, text, f"Данные от агента {target.display_name}:\n{data}")
+
+    @staticmethod
+    def ask_timeout(target: Any) -> float:
+        """Сколько ждать ответ агента: настраивается в его конфиге (task_timeout_s), по умолчанию 60 с."""
+        try:
+            return float(target.config.get("task_timeout_s", 60)) + 5.0
+        except (TypeError, ValueError):
+            return 65.0
 
     async def _search(self, identity: str, text: str, query: str) -> str:
         system = (
@@ -171,7 +192,10 @@ class GenericAgent:
                 raise BusError("Этот агент не составляет карточки")
             return await self.build_card(str(payload.get("text", ""))[:MAX_TEXT_LEN])
         if kind == "ask":
-            return await self.answer(str(payload.get("text", ""))[:MAX_TEXT_LEN], depth=int(task["depth"]))
+            return await self.answer(
+                str(payload.get("text", ""))[:MAX_TEXT_LEN], depth=int(task["depth"]),
+                chat=(task.get("chat_id"), task.get("reply_to_message_id")),
+            )
         raise BusError(f"Неизвестный тип задания: {kind}")
 
 
@@ -210,7 +234,7 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
         except TelegramAPIError:
             pass
         try:
-            answer = await agent.answer(text[:MAX_TEXT_LEN])
+            answer = await agent.answer(text[:MAX_TEXT_LEN], chat=(message.chat.id, message.message_id))
         except GroqError as exc:
             answer = exc.user_message
         for i, part in enumerate(chunks(answer)):

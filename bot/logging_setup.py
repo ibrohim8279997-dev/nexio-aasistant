@@ -2,15 +2,33 @@
 from __future__ import annotations
 
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
 _FILTERS: list["RedactSecretsFilter"] = []
+_SECRET_PATTERNS = (
+    re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b"),  # токен бота
+    re.compile(r"\bgsk_[A-Za-z0-9]{16,}\b"),  # ключ Groq
+    re.compile(r"\bgAAAA[A-Za-z0-9_=-]{40,}"),  # шифротекст Fernet
+)
+_EXTRA_SECRETS: list[str] = []
+
+
+def redact_text(text: str) -> str:
+    """Убрать из текста токены, ключи и известные значения секретов (для логов, отчётов, diff)."""
+    for secret in _EXTRA_SECRETS:
+        text = text.replace(secret, "***")
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
 
 
 def register_secret(value: str) -> None:
     """Добавить секрет, появившийся во время работы (например, токен нового агента)."""
+    if value and len(value) >= 8 and value not in _EXTRA_SECRETS:
+        _EXTRA_SECRETS.append(value)
     for flt in _FILTERS:
         flt.add(value)
 
@@ -30,7 +48,7 @@ class RedactSecretsFilter(logging.Filter):
     def _redact(self, text: str) -> str:
         for secret in self._secrets:
             text = text.replace(secret, "***")
-        return text
+        return redact_text(text)
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:

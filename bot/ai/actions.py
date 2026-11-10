@@ -119,6 +119,10 @@ DISPATCH_TYPES = (Delegate, CreateAgent)
 _ACTION_ADAPTER: TypeAdapter[Any] = TypeAdapter(Action)
 
 
+def _norm(value: str) -> str:
+    return re.sub(r"[\s\"'«»“”.,:;!?()]+", " ", (value or "").casefold()).strip()
+
+
 def _extract_json(raw: str) -> Any:
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
@@ -164,7 +168,7 @@ def parse_actions(raw: str, today: date, agents: set[str] | None = None) -> list
                 continue
         if isinstance(action, AddExpense) and action.amount > MAX_AMOUNT[action.currency]:
             continue
-        if isinstance(action, Delegate) and (agents is None or action.agent not in agents):
+        if isinstance(action, Delegate) and (agents is None or _norm(action.agent) not in {_norm(a) for a in agents}):
             continue
         if isinstance(action, CreateAgent) and agents is None:
             continue

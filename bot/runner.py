@@ -72,7 +72,7 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
 
         llm = make_llm(settings, agent.provider, agent.text_model, agent.stt_model)
         bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-        bus = Bus(db, agent.name)
+        bus = Bus(db, agent.name, owner_id=settings.admin_id, display=agent.display_name)
         ctx = AgentContext(agent=agent, registry=registry, system_db=db, bus=bus)
         interrupted = await db.queue_fail_interrupted(agent.name, _now())
         if interrupted:

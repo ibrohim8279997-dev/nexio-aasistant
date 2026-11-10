@@ -19,6 +19,11 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
 TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b")  # формат токена BotFather
 
 
+def norm_name(value: str | None) -> str:
+    """Имя для сравнения: без регистра, пробелов по краям и кавычек/знаков препинания."""
+    return re.sub(r"[\s\"'«»“”.,:;!?()]+", " ", (value or "").casefold()).strip()
+
+
 @dataclass
 class AgentConfig:
     name: str
@@ -145,6 +150,24 @@ class Registry:
     async def get(self, name: str) -> AgentConfig | None:
         row = await self._db.get_agent(name)
         return AgentConfig.from_row(row) if row else None
+
+    async def find(self, query: str, enabled_only: bool = False) -> AgentConfig | None:
+        """Найти агента по display_name или по agent_id, регистр не важен («Мими», «мими», «assistant»)."""
+        wanted = norm_name(query)
+        if not wanted:
+            return None
+        for agent in await self.all(enabled_only=enabled_only):
+            if wanted in (norm_name(agent.name), norm_name(agent.display_name)):
+                return agent
+        return None
+
+    async def aliases(self, exclude: str | None = None) -> set[str]:
+        """Все допустимые обращения к включённым агентам (display_name и agent_id) в нормализованном виде."""
+        result: set[str] = set()
+        for agent in await self.all(enabled_only=True):
+            if agent.name != exclude:
+                result |= {norm_name(agent.name), norm_name(agent.display_name)}
+        return result
 
     async def all(self, enabled_only: bool = False) -> list[AgentConfig]:
         return [AgentConfig.from_row(r) for r in await self._db.list_agents(enabled_only)]

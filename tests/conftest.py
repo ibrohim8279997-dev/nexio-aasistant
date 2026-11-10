@@ -119,11 +119,11 @@ async def app(tmp_path, db, groq):
     registry = Registry(db)
     await registry.seed_defaults()
     kimo = await registry.get("kimo")
-    scoped = ScopedDB(db, kimo.name, kimo.allowed_tables)
+    scoped = ScopedDB(db, kimo.name, kimo.allowed_tables, live=True)
     secrets = SecretStore(db, Crypto(settings.encryption_key))
     from bot.agents.bus import Bus
 
-    ctx = AgentContext(agent=kimo, registry=registry, system_db=db, bus=Bus(db, "kimo"))
+    ctx = AgentContext(agent=kimo, registry=registry, system_db=db, bus=Bus(db, "kimo", owner_id=ADMIN_ID))
     deps = dict(db=scoped, secrets=secrets, groq=groq, rates=FakeRates(scoped), agent_ctx=ctx)
     dp = build_dispatcher(settings, **deps)
     return dp, FakeBot(), settings

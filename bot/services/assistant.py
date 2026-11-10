@@ -137,17 +137,26 @@ async def _delegate(action: Delegate, deps: AssistantDeps) -> Answer:
     ctx = deps.ctx
     if ctx is None or ctx.bus is None:
         return Answer("Передача задач другим агентам здесь недоступна.")
-    target = await ctx.registry.get(action.agent)
-    if target is None or not target.enabled or target.name == ctx.agent.name:
+    target = await ctx.registry.find(action.agent, enabled_only=True)  # по display_name и по agent_id
+    if target is None or target.name == ctx.agent.name:
         return Answer("❓ Не нашёл подходящего агента. Кому передать задачу?")
+    context = {
+        "from": ctx.agent.name, "from_name": ctx.agent.display_name, "owner_request": action.task[:500],
+        "about": action.task[:300], "need": f"выполнить задачу владельца: {action.task[:300]}",
+    }
     try:
         if deps.is_group and deps.chat_id:
-            # Ответит сам агент — от своего имени, реплаем на исходное сообщение
+            # Ответит сам агент — от своего имени, реплаем на исходное сообщение (deliver_by=receiver)
             await ctx.bus.send(
-                target.name, {"type": "ask", "text": action.task}, depth=1, chat_id=deps.chat_id, reply_to=deps.reply_to
+                target.name,
+                {"type": "ask", "text": action.task, "deliver_by": "receiver", "context": context},
+                depth=1, chat_id=deps.chat_id, reply_to=deps.reply_to,
             )
             return Answer(f"👉 Задачу взял(а) <b>{escape(target.display_name)}</b>.")
-        result = await ctx.bus.ask(target.name, action.task, depth=1)
+        result = await ctx.bus.ask(
+            target.name, action.task, depth=1, chat_id=deps.chat_id, reply_to=deps.reply_to, context=context,
+            timeout=float(target.config.get("task_timeout_s", 60)) + 5.0,
+        )
     except DepthExceeded as exc:
         return Answer(escape(str(exc)))
     except BusError as exc:

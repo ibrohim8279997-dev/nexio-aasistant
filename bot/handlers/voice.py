@@ -90,7 +90,7 @@ async def process_text(message: Message, text: str, bot: Bot, groq: GroqClient, 
     # Передавать задачи может только владелец: агенты — его помощники
     agents = None
     if deps.ctx is not None and deps.is_owner:
-        agents = {a.name for a in await deps.ctx.registry.others(deps.ctx.agent.name)}
+        agents = await deps.ctx.registry.aliases(exclude=deps.ctx.agent.name)
     try:
         raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks, deps.identity))
         actions = parse_actions(raw, now_local().date(), agents)
