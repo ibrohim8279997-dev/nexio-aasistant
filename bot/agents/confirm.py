@@ -53,6 +53,7 @@ class Proposal:
     id: int
     summary: str
     expands: bool
+    html: bool = False  # summary уже содержит HTML-разметку (отчёт самолечения)
 
 
 def clean_display_name(value: Any) -> str:
@@ -81,6 +82,8 @@ class Confirmations:
         self.ops = ops
         self.owner_id = owner_id
         self.online_timeout = online_timeout
+        # исполнители действий, которые готовятся отдельным сервисом (apply_fix из selfheal.py)
+        self.executors: dict[str, Any] = {}
 
     # ---------- предложение ----------
 
@@ -101,7 +104,23 @@ class Confirmations:
         await self.ops._audit("propose", target, {"pending": pid, "action": action, "params": _short(clean, 500)})
         return Proposal(pid, summary, action in EXPANDING)
 
+    async def propose_raw(self, action: str, target: str, params: dict[str, Any], summary: str,
+                          chat_id: int | None = None) -> Proposal:
+        """Подтверждение для действия, которое подготовил отдельный сервис (например, план исправления с отчётом)."""
+        if action not in self.executors:
+            raise ConfirmError("Для этого действия нет исполнителя")
+        await self.ops.scope(target, f"propose_{action}")
+        now = now_utc()
+        pid = await self._db.pending_create(
+            self.actor, action, target, params, summary, to_db(now), to_db(now + CONFIRM_TTL), chat_id,
+        )
+        await self.ops._audit("propose", target, {"pending": pid, "action": action, "diff": "; ".join(params.get("diff", []))[:500]})
+        return Proposal(pid, summary, False, html=True)
+
     async def _validate(self, action: str, cfg: AgentConfig, params: dict[str, Any]) -> dict[str, Any]:
+        if cfg.name == self.actor and action in ("set_prompt", "set_models", "grant_tables", "revoke_tables",
+                                                  "grant_commands", "revoke_commands", "write_row"):
+            raise ConfirmError("Свою конфигурацию и права я сам не меняю: подготовлю описание и diff, а правку делает владелец.")
         if action in ("stop", "restart") and cfg.name == self.actor:
             raise ConfirmError("Свой процесс я сам не останавливаю и не перезапускаю: это делает владелец через run.sh.")
         if action == "start" and (cfg.config.get("draft") or cfg.config.get("awaiting_token") or cfg.config.get("awaiting_name")):
@@ -209,7 +228,8 @@ class Confirmations:
     async def send_confirmation(self, bot: Bot, proposal: Proposal) -> bool:
         """Подтверждение уходит владельцу только в личку, даже если просьба пришла из группы."""
         mark = "⚠️ " if proposal.expands else "❓ "
-        text = f"{mark}<b>Подтвердите действие #{proposal.id}</b>\n{escape(proposal.summary)}\n\nСрок: 15 минут."
+        body = proposal.summary if proposal.html else escape(proposal.summary)
+        text = f"{mark}<b>Подтвердите действие #{proposal.id}</b>\n{body}\n\nСрок: 15 минут."
         try:
             await bot.send_message(self.owner_id, text, reply_markup=confirm_kb(proposal.id), parse_mode="HTML")
             return True
@@ -259,6 +279,8 @@ class Confirmations:
         cfg = await self.ops.scope(target, f"execute_{action}")  # роль актора могла измениться после предложения
         who = f"{cfg.display_name} ({cfg.name})"
         db = self._db
+        if action in self.executors:
+            return await self.executors[action](row, cfg, self)
         if action == "stop":
             await db.update_agent(target, enabled=False)
             await procs.get_control().stop(target)

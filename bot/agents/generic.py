@@ -90,6 +90,7 @@ ADMIN_PLAN_PROMPT = """{identity}
 {{"type":"agents_report"}} — кто работает, статусы и проблемы
 {{"type":"agent_logs","agent":"<имя>","minutes":<N или null>}} — лог агента
 {{"type":"agent_tables","agent":"<имя>"}} — структура таблиц агента; {{"type":"agent_data","agent":"<имя>","table":"<таблица>","limit":10}} — данные
+{{"type":"diagnose_agent","agent":"<имя>"}} — найти причину сбоя и подготовить исправление конфигурации (применится после «да»)
 {{"type":"manage_agent","agent":"<имя>","op":"start|stop|restart|rename|set_role|set_prompt|set_models|grant_tables|revoke_tables|grant_commands|revoke_commands","value":<строка или список>}} — изменение, владелец подтвердит «да» в личке
 {{"type":"clarify","question":"<один короткий вопрос>"}} и {{"type":"reply","text":"<ответ>"}} — если запрос не про агентов или неясен.
 Чужими агентами, расходами и секретами ты не занимаешься. Не выдумывай данные."""
@@ -350,11 +351,13 @@ async def run_generic(settings: Settings, ctx: AgentContext, llm: LLMClient, bot
         from bot.agents.admin_actions import AdminActions
         from bot.agents.admin_ops import AdminOps
         from bot.agents.confirm import Confirmations
+        from bot.agents.selfheal import SelfHeal
         from bot.handlers import confirm as confirm_handlers
 
         ops = AdminOps(ctx.system_db, ctx.agent.name)
         confirm = Confirmations(ctx.system_db, ctx.agent.name, ops, settings.admin_id)
         ctx.admin = AdminActions(ctx, ops, confirm, bot)
+        ctx.admin.selfheal = SelfHeal(ctx, ops, confirm)
         dp["confirm"] = confirm
         dp.include_router(confirm_handlers.router)
     dp.include_router(build_router(agent, me.id, me.username))

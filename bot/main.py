@@ -16,6 +16,7 @@ from bot.agents.admin_actions import AdminActions
 from bot.agents.admin_ops import AdminOps
 from bot.agents.confirm import Confirmations
 from bot.agents.kimo import KimoBusHandler
+from bot.agents.selfheal import SelfHeal
 from bot.agents.watchdog import Watchdog
 from bot.ai.llm import LLMClient
 from bot.config import Settings
@@ -105,6 +106,7 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
     ops = AdminOps(ctx.system_db, agent.name)  # слой admin: чтение структуры, логов, статусов; роль из БД
     confirm = Confirmations(ctx.system_db, agent.name, ops, settings.admin_id)
     ctx.admin = AdminActions(ctx, ops, confirm, bot)
+    ctx.admin.selfheal = SelfHeal(ctx, ops, confirm)
     dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx, confirm=confirm)
     scheduler = BotScheduler(bot, scoped, settings, system_db=ctx.system_db)  # type: ignore[arg-type]
     worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings), bot, settings.admin_id, state=ctx.state)

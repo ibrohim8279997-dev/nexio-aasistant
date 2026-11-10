@@ -20,6 +20,7 @@ from bot.ai.actions import (
     CompleteTask,
     CreateAgent,
     Delegate,
+    DiagnoseAgent,
     ListReminders,
     ListTasks,
     ManageAgent,
@@ -41,7 +42,7 @@ from bot.timeutil import TZ, from_db, now_local, now_utc, to_db
 
 log = logging.getLogger(__name__)
 
-ADMIN_ACTIONS = (ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData)
+ADMIN_ACTIONS = (ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData, DiagnoseAgent)
 
 
 @dataclass

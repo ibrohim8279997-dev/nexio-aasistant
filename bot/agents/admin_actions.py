@@ -33,6 +33,7 @@ class AdminActions:
         self.ops = ops
         self.confirm = confirm
         self.bot = bot
+        self.selfheal: Any = None  # SelfHeal: диагностика и исправление
 
     async def find(self, query: str) -> AgentConfig | None:
         return await self.ctx.registry.find(query)
@@ -56,7 +57,7 @@ class AdminActions:
 
     async def run(self, action: Any, *, owner: bool, chat_id: int | None = None) -> str | None:
         """Выполнить административное действие от модели. Возвращает HTML-текст или None, если действие не административное."""
-        from bot.ai.actions import AgentData, AgentLogs, AgentsReport, AgentTables, ManageAgent
+        from bot.ai.actions import AgentData, AgentLogs, AgentsReport, AgentTables, DiagnoseAgent, ManageAgent
 
         try:
             if isinstance(action, AgentsReport):
@@ -65,6 +66,11 @@ class AdminActions:
                 return "Это действие доступно только владельцу."
             if isinstance(action, ManageAgent):
                 return await self.manage(action.agent, action.op, action.value, chat_id)
+            if isinstance(action, DiagnoseAgent):
+                if self.selfheal is None:
+                    return "Диагностика здесь недоступна."
+                _, text = await self.selfheal.diagnose(action.agent)
+                return text
             if isinstance(action, AgentLogs):
                 target = await self._target(action.agent)
                 return await report.agent_logs(self.ops, target.display_name, target.name, action.minutes)

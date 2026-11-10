@@ -145,6 +145,13 @@ class AgentData(_Base):
     limit: int = Field(default=10, ge=1, le=50)
 
 
+class DiagnoseAgent(_Base):
+    """Диагностика агента: полный отчёт; исправление применяется только после «да» владельца."""
+
+    type: Literal["diagnose_agent"]
+    agent: str = Field(min_length=1, max_length=64)
+
+
 class CreateAgent(_Base):
     type: Literal["create_agent"]
     description: str = Field(min_length=10, max_length=3000)
@@ -153,12 +160,12 @@ class CreateAgent(_Base):
 Action = Annotated[
     Union[
         AddTask, AddExpense, CompleteTask, ListTasks, ShowStats, Reply, ListReminders, Delegate, Clarify, CreateAgent,
-        ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData,
+        ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData, DiagnoseAgent,
     ],
     Field(discriminator="type"),
 ]
 DISPATCH_TYPES = (Delegate, CreateAgent)
-ADMIN_TYPES: tuple[type, ...] = (ManageAgent, AgentLogs, AgentTables, AgentData)  # только от владельца, не из шины
+ADMIN_TYPES: tuple[type, ...] = (ManageAgent, AgentLogs, AgentTables, AgentData, DiagnoseAgent)  # только от владельца, не из шины
 _ACTION_ADAPTER: TypeAdapter[Any] = TypeAdapter(Action)
 
 
@@ -243,6 +250,7 @@ SYSTEM_PROMPT = """{identity}
 10. {{"type":"create_agent","description":"<полное описание нужного агента: задачи, что можно, что нельзя, конфиденциальность>"}}
 11a. {{"type":"agents_report"}} — «кто работает», статусы и проблемы агентов
 11b. {{"type":"agent_logs","agent":"<имя>","minutes":<N или null>}} — логи агента; 11c. {{"type":"agent_tables","agent":"<имя>"|null}} — структура таблиц; 11d. {{"type":"agent_data","agent":"<имя>","table":"<таблица>","limit":10}}
+11e. {{"type":"diagnose_agent","agent":"<имя>"}} — найти причину сбоя агента и подготовить исправление (применится только после «да»)
 11. {{"type":"manage_agent","agent":"<имя или системное имя>","op":"start|stop|restart|rename|set_role|set_prompt|set_models|grant_tables|revoke_tables|grant_commands|revoke_commands","value":<строка или список, если нужно>}} — управление агентом; владелец подтвердит в личке
 
 Правила:
