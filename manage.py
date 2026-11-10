@@ -12,6 +12,7 @@
     python manage.py agents enable|disable <имя>
     python manage.py agents sync [имя]       — перечитать agents/*.json в БД (enabled и bot_username сохраняются)
     python manage.py agents add <файл.json>  — добавить агента из файла (выключенным)
+    python manage.py agents rename <id> <Имя> — задать display_name (технический id не меняется); пишется в audit_log
     python manage.py agents set-token <имя>  — сохранить токен бота зашифрованным в secrets (ввод скрыт)
 """
 from __future__ import annotations
@@ -122,6 +123,30 @@ def cmd_agents(args: argparse.Namespace) -> int:
             card["enabled"] = False
             added = await db.insert_agent(card, to_db(now_utc()))
             print("Добавлен (выключен). Включите: python manage.py agents enable " + card["name"] if added else "Уже есть")
+        elif args.action == "rename":
+            from bot.agents.confirm import ConfirmError, clean_display_name
+
+            if not name or not NAME_RE.match(name) or not args.value:
+                print("Формат: python manage.py agents rename <id> <Имя>")
+                return 1
+            current = await db.get_agent(name)
+            if current is None:
+                print("Нет такого агента")
+                return 1
+            try:
+                new_name = clean_display_name(" ".join(args.value))
+            except ConfirmError as exc:
+                print(exc)
+                return 1
+            for other in await db.list_agents():
+                if other["name"] != name and new_name.casefold() in (other["name"].casefold(), (other.get("display_name") or "").casefold()):
+                    print(f"Имя «{new_name}» уже занято агентом {other['name']}")
+                    return 1
+            await db.update_agent(name, display_name=new_name)
+            # запуск с сервера под рукой владельца: подтверждение — сам факт ручного запуска команды
+            await db.audit(to_db(now_utc()), "cli", "set_display_name", name,
+                           {"before": current.get("display_name"), "after": new_name})
+            print(f"Имя агента {name}: «{current.get('display_name') or '—'}» → «{new_name}»")
         elif args.action == "set-token":
             from bot.config import load_settings
             from bot.crypto import Crypto, SecretStore
@@ -147,8 +172,9 @@ def main() -> int:
     p_db.add_argument("--yes", action="store_true")
     p_db.set_defaults(func=cmd_db)
     p_ag = sub.add_parser("agents")
-    p_ag.add_argument("action", choices=["list", "enabled", "show", "enable", "disable", "sync", "add", "set-token"])
+    p_ag.add_argument("action", choices=["list", "enabled", "show", "enable", "disable", "sync", "add", "set-token", "rename"])
     p_ag.add_argument("arg", nargs="?")
+    p_ag.add_argument("value", nargs="*")
     p_ag.set_defaults(func=cmd_agents)
     args = parser.parse_args()
     try:

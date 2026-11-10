@@ -12,6 +12,7 @@ from aiogram.filters import BaseFilter, Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from bot.agents import builder_flow as flow
+from bot.agents.confirm import Confirmations
 from bot.agents.context import AgentContext
 from bot.agents.registry import NAME_RE, TOKEN_RE
 from bot.config import Settings
@@ -22,6 +23,13 @@ from bot.logging_setup import register_secret
 
 log = logging.getLogger(__name__)
 router = Router(name="agents_admin")
+
+NAME_HELP = (
+    "✏️ Как назвать агента <code>{name}</code>?\n"
+    "Пришлите имя одним сообщением: до 30 символов, 1-3 слова (например, «Миди»). Предложение создателя: «{suggested}».\n"
+    "Имя придёт вам на подтверждение, пока оно не подтверждено, агент не запускается. "
+    "Если ждут несколько агентов: /agentname имя_агента Имя"
+)
 
 TOKEN_HELP = (
     "🔑 Теперь создайте бота для агента <b>{name}</b>:\n"
@@ -43,6 +51,8 @@ router.callback_query.filter(IsOwner())
 def _status(agent: Any) -> str:
     if agent.config.get("draft"):
         return "📝 черновик"
+    if agent.config.get("awaiting_name"):
+        return "✏️ ждёт имя"
     if agent.config.get("awaiting_token"):
         return "🔑 ждёт токен"
     return "✅ включён" if agent.enabled else "⏸ выключен"
@@ -79,12 +89,11 @@ async def cb_card(call: CallbackQuery, callback_data: AgentCb, bot: Bot, setting
     tables = ", ".join(row["allowed_tables"]) or "нет доступа к таблицам"
     commands = ", ".join("/" + c for c in row["allowed_commands"])
     await show(call, f"✅ Агент <code>{name}</code> подтверждён.\nТаблицы: {escape(tables)}\nКоманды: {escape(commands)}")
+    suggested = escape(str(row["config"].get("suggested_name") or "—"))
     try:
-        await bot.send_message(settings.admin_id, TOKEN_HELP.format(name=name))
+        await bot.send_message(settings.admin_id, NAME_HELP.format(name=name, suggested=suggested))
     except TelegramAPIError:
         log.warning("Не удалось написать владельцу в личку")
-    if call.message and call.message.chat.type != ChatType.PRIVATE:
-        await bot.send_message(call.message.chat.id, "🔑 Токен для нового бота пришлите мне в личку.")
 
 
 async def _activate(message: Message, agent_ctx: AgentContext, secrets: SecretStore, name: str, token: str) -> None:
@@ -103,6 +112,47 @@ async def _activate(message: Message, agent_ctx: AgentContext, secrets: SecretSt
         await message.answer(f"✅ Агент <code>{name}</code> (@{escape(username)}) работает. Добавьте его в группу агентов.")
     else:
         await message.answer(f"⚠️ Агент запущен, но не ответил. Логи: <code>./run.sh logs {name}</code>")
+
+
+class AwaitingName(BaseFilter):
+    """Короткий текст владельца, пока ровно один новый агент ждёт имя (длинные сообщения — обычные запросы)."""
+
+    async def __call__(self, message: Message, agent_ctx: AgentContext) -> bool:
+        text = (message.text or "").strip()
+        if not text or text.startswith("/") or len(text) > 40 or len(text.split()) > 3:
+            return False
+        return len(await flow.awaiting_name(agent_ctx)) == 1
+
+
+async def _propose_name(message: Message, agent_ctx: AgentContext, confirm: Confirmations, bot: Bot, name: str, value: str) -> None:
+    try:
+        proposal = await flow.propose_name(agent_ctx, confirm, name, value)
+    except flow.FlowError as exc:
+        await message.answer(f"⚠️ {escape(str(exc))}")
+        return
+    sent = await confirm.send_confirmation(bot, proposal)
+    await message.answer("📨 Имя отправил вам в личку на подтверждение." if sent else "⚠️ Не смог написать в личку: нажмите /start у меня.")
+
+
+@router.message(AwaitingName())
+async def on_name(message: Message, agent_ctx: AgentContext, confirm: Confirmations, bot: Bot) -> None:
+    (name,) = await flow.awaiting_name(agent_ctx)
+    await _propose_name(message, agent_ctx, confirm, bot, name, message.text or "")
+
+
+@router.message(Command("agentname"))
+async def cmd_agentname(message: Message, command: CommandObject, agent_ctx: AgentContext, confirm: Confirmations, bot: Bot) -> None:
+    parts = (command.args or "").split(maxsplit=1)
+    if len(parts) != 2 or not NAME_RE.match(parts[0]):
+        await message.answer("Формат: /agentname имя_агента Имя")
+        return
+    agent = await agent_ctx.registry.find(parts[0])
+    if agent is None:
+        await message.answer("Нет такого агента.")
+        return
+    await _propose_name(message, agent_ctx, confirm, bot, agent.name, parts[1]) if agent.config.get("awaiting_name") else await message.answer(
+        await agent_ctx.admin.manage(agent.name, "rename", parts[1], message.chat.id), parse_mode=None
+    )
 
 
 def _has_token(text: str) -> bool:

@@ -125,8 +125,7 @@ async def test_create_agent_flow(app, db, groq, tmp_path, monkeypatch):
     try:
         await dp.feed_update(bot, message_update(ADMIN_ID, "создай агента для сотрудников про Nexio CRM"))
     finally:
-        worker.stop()
-        await runner
+        pass
     card_msg = bot.calls[-1]
     assert "Карточка нового агента" in card_msg.text and "staff_bot" in card_msg.text
     draft = await db.get_agent("staff_bot")
@@ -137,7 +136,24 @@ async def test_create_agent_flow(app, db, groq, tmp_path, monkeypatch):
     # без подтверждения агент не запускается; владелец подтверждает с правами по предложению
     await dp.feed_update(bot, callback_update(ADMIN_ID, AgentCb(action="yes_sugg", name="staff_bot").pack()))
     row = await db.get_agent("staff_bot")
-    assert row["allowed_tables"] == ["tasks"] and row["config"]["awaiting_token"] is True
+    assert row["allowed_tables"] == ["tasks"] and row["config"]["awaiting_name"] is True
+    assert row["display_name"] is None and row["created_by"] == "agent_builder" and row["access_role"] == "agent"
+    assert any("Как назвать агента" in t for t in bot.texts())  # имя спрашиваем у владельца
+
+    # токен до имени не принимается, агент не запускается
+    await dp.feed_update(bot, message_update(ADMIN_ID, TOKEN))
+    assert "Сначала задайте имя" in bot.texts()[-1] or "не жду токен" in bot.texts()[-1]
+    await builder_worker_stop(worker, runner)
+
+    # владелец называет агента, имя уходит на подтверждение «да» в личке
+    await dp.feed_update(bot, message_update(ADMIN_ID, "Штаб"))
+    from bot.keyboards import ConfirmCb
+    confirm_msg = next(c for c in reversed(bot.calls) if getattr(c, "reply_markup", None) and "Подтвердите" in (c.text or ""))
+    pid = ConfirmCb.unpack(confirm_msg.reply_markup.inline_keyboard[0][0].callback_data).id
+    assert (await db.get_agent("staff_bot"))["display_name"] is None  # пока не подтверждено
+    await dp.feed_update(bot, callback_update(ADMIN_ID, ConfirmCb(id=pid, yes=1).pack()))
+    row = await db.get_agent("staff_bot")
+    assert row["display_name"] == "Штаб" and row["config"]["awaiting_token"] is True and not row["config"]["awaiting_name"]
     assert any("BotFather" in t for t in bot.texts())
 
     launched = []
@@ -162,6 +178,11 @@ async def test_create_agent_flow(app, db, groq, tmp_path, monkeypatch):
     assert row["enabled"] is True and row["bot_username"] == "nexio_staff_bot"
     stored = await db.get_secret("bot_token:staff_bot")
     assert stored and TOKEN not in stored  # хранится только шифротекст
+
+
+async def builder_worker_stop(worker, runner):
+    worker.stop()
+    await runner
 
 
 async def test_card_buttons_owner_only(app, db):

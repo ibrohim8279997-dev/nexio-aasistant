@@ -79,11 +79,18 @@ def parse_card(raw: str) -> AgentCard:
         raise CardError(f"карточка не прошла проверку: {type(exc).__name__}") from exc
 
 
-def card_to_agent(card: AgentCard, models: dict[str, Any], tables: list[str], commands: list[str]) -> dict[str, Any]:
-    """Карточка + права, которые выбрал владелец -> запись для таблицы agents (выключена до запуска)."""
+def card_to_agent(card: AgentCard, models: dict[str, Any], tables: list[str], commands: list[str],
+                  created_by: str = "agent_builder") -> dict[str, Any]:
+    """Карточка + права, которые выбрал владелец -> запись для таблицы agents (выключена до запуска).
+
+    Имя (display_name) модель только предлагает (config.suggested_name): записывается оно после вопроса владельцу."""
     return {
         "name": card.name,
+        "display_name": None,
+        "created_by": created_by,
+        "access_role": "agent",
         "role": card.role,
+        "role_description": card.role,
         "system_prompt": card.system_prompt,
         "models": {
             "provider": models.get("provider", "groq"),
@@ -96,7 +103,7 @@ def card_to_agent(card: AgentCard, models: dict[str, Any], tables: list[str], co
         "deny_rules": card.deny_rules,
         "enabled": False,
         "config": {
-            "display_name": card.display_name,
+            "suggested_name": card.display_name,
             "kind": "generic",
             "token_env": f"{card.name.upper()}_TOKEN",
             "audience": "owner",
@@ -110,7 +117,8 @@ def card_text(card: AgentCard) -> str:
 
     lines = [
         "🧩 <b>Карточка нового агента</b>",
-        f"Имя: <b>{escape(card.display_name)}</b> (<code>{card.name}</code>)",
+        f"Системное имя: <code>{card.name}</code>. Имя для общения вы зададите следующим шагом "
+        f"(предложение создателя: «{escape(card.display_name)}»).",
         f"Роль: {escape(card.role)}",
         f"Голос (Whisper): {'да' if card.needs_stt else 'нет'} · Веб-поиск: {'да' if card.needs_search else 'нет'}",
         f"Запреты: {items(card.deny_rules)}",

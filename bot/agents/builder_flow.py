@@ -65,7 +65,7 @@ async def approve(ctx: AgentContext, name: str, with_suggested: bool) -> dict[st
     config = dict(row["config"])
     tables = [t for t in config.get("suggested_tables", []) if t in GRANTABLE_TABLES] if with_suggested else []
     commands = sorted({"start", "help", *(config.get("suggested_commands", []) if with_suggested else [])})
-    config.update(draft=False, awaiting_token=True)
+    config.update(draft=False, awaiting_name=True)  # дальше: имя -> подтверждение -> токен -> запуск
     await ctx.system_db.update_agent(name, allowed_tables=tables, allowed_commands=commands, config=config)
     row.update(allowed_tables=tables, allowed_commands=commands, config=config)
     return row
@@ -73,7 +73,8 @@ async def approve(ctx: AgentContext, name: str, with_suggested: bool) -> dict[st
 
 async def cancel(ctx: AgentContext, name: str) -> bool:
     row = await ctx.system_db.get_agent(name)
-    if row is None or row["enabled"] or not (row["config"].get("draft") or row["config"].get("awaiting_token")):
+    flags = ("draft", "awaiting_name", "awaiting_token")
+    if row is None or row["enabled"] or not any(row["config"].get(f) for f in flags):
         return False
     return await ctx.system_db.delete_agent(name)
 
@@ -93,6 +94,21 @@ async def awaiting_token(ctx: AgentContext) -> list[str]:
     return [a.name for a in await ctx.registry.all() if a.config.get("awaiting_token")]
 
 
+async def awaiting_name(ctx: AgentContext) -> list[str]:
+    return [a.name for a in await ctx.registry.all() if a.config.get("awaiting_name")]
+
+
+async def propose_name(ctx: AgentContext, confirm: Any, name: str, value: str) -> Any:
+    """Имя нового агента: предлагается владельцу на подтверждение («да» в личке), до этого агент не запускается."""
+    row = await ctx.system_db.get_agent(name)
+    if row is None or not row["config"].get("awaiting_name"):
+        raise FlowError("Этот агент не ждёт имя.")
+    try:
+        return await confirm.propose("set_display_name", name, {"value": value})
+    except Exception as exc:  # AdminError / ConfirmError: понятный текст для владельца
+        raise FlowError(str(exc)) from exc
+
+
 async def check_token(token: str) -> str:
     """Проверить токен через getMe, вернуть username бота."""
     probe = Bot(token)
@@ -110,7 +126,10 @@ async def check_token(token: str) -> str:
 async def accept_token(ctx: AgentContext, secrets: SecretStore, name: str, token: str) -> str:
     row = await ctx.system_db.get_agent(name)
     if row is None or not row["config"].get("awaiting_token"):
-        raise FlowError("Этот агент не ждёт токен.")
+        raise FlowError("Этот агент не ждёт токен." if not (row and row["config"].get("awaiting_name"))
+                        else "Сначала задайте имя агента и подтвердите его.")
+    if not row.get("display_name"):
+        raise FlowError("У агента нет подтверждённого имени.")
     username = await check_token(token)
     for other in await ctx.registry.all():
         if other.name != name and other.bot_username and other.bot_username.lower() == username.lower():

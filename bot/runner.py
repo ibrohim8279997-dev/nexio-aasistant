@@ -62,6 +62,8 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
             raise AgentDisabled(f"Агент {name} не найден в таблице agents")
         if not agent.enabled:
             raise AgentDisabled(f"Агент {name} выключен (enabled=0)")
+        if agent.config.get("draft") or agent.config.get("awaiting_name") or agent.config.get("awaiting_token"):
+            raise AgentDisabled(f"Агент {name} не готов: нужны подтверждённое имя и токен бота")
 
         token = await resolve_token(agent, settings, SecretStore(db, crypto))
         if not token:

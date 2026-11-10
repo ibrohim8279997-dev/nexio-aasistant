@@ -277,7 +277,12 @@ class Confirmations:
                     f"⚠️ Агент {who} {verb}, но heartbeat не пришёл за {int(self.online_timeout)} с. Проверьте лог."), {"agent": target, "online": online}
         if action == "set_display_name":
             await db.update_agent(target, display_name=p["value"])
-            return f"✅ Имя изменено: «{cfg.display_name}» → «{p['value']}».", {"before": cfg.display_name, "after": p["value"]}
+            details = {"before": cfg.display_name, "after": p["value"]}
+            if cfg.config.get("awaiting_name"):  # новый агент: имя подтверждено, дальше токен
+                await db.update_agent(target, config={**cfg.config, "awaiting_name": False, "awaiting_token": True})
+                return (f"✅ Имя подтверждено: «{p['value']}».\n🔑 Теперь создайте бота в @BotFather и пришлите токен мне в личку: "
+                        "сообщение с токеном я удалю, а токен сохраню зашифрованным."), details
+            return f"✅ Имя изменено: «{cfg.display_name}» → «{p['value']}».", details
         if action == "set_role_description":
             await db.update_agent(target, role_description=p["value"], role=p["value"])
             return f"✅ Описание роли {who} обновлено.", {"before": _short(cfg.role_description), "after": _short(p["value"])}
