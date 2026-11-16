@@ -1,0 +1,11 @@
+# Зависимости голосовой службы (voice_sip.py). Ставятся в окружение, где собран pjsua2 (обычно ~/sipenv):
+#   ~/sipenv/bin/pip install -r requirements-voice.txt
+# pjsua2 собирается из исходников PJSIP отдельно и здесь не указывается.
+aiogram==3.31.0
+aiosqlite==0.22.1
+httpx==0.28.1
+python-dotenv==1.2.4
+tzdata>=2024.1
+edge-tts==7.3.1
+webrtcvad==2.0.10
+setuptools<81  # webrtcvad импортирует pkg_resources, в setuptools 81+ его нет

@@ -31,8 +31,9 @@ async def agents_report(ops: AdminOps, include_logs: bool = True) -> str:
     queue = await ops.queue_overview()
     now = now_utc()
     names = {a["name"]: a["display_name"] for a in agents}
-    online = sum(1 for a in agents if a["status"] in ("online", "busy"))
-    lines = [f"📋 <b>Агенты</b>: работают {online} из {len(agents)}", ""]
+    enabled = [a for a in agents if a["enabled"]]  # выключенные (например, голосовая служба до настройки) не считаются
+    online = sum(1 for a in enabled if a["status"] in ("online", "busy"))
+    lines = [f"📋 <b>Агенты</b>: работают {online} из {len(enabled)}", ""]
     problems = []
     for a in agents:
         icon = STATUS_ICON.get(a["status"], "⚫")

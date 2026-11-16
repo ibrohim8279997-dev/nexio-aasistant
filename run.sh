@@ -24,14 +24,23 @@ activate() {
   . "$VENV/bin/activate"
 }
 
+# Службы без токена Telegram (voice_sip) запускаются своим скриптом и своим окружением (там собран pjsua2).
+cmd_for() {
+  case "$1" in
+    voice_sip) VENV="${VOICE_VENV:-$HOME/sipenv}"; CMD=(python voice_sip.py) ;;
+    *) CMD=(python run_agent.py "$1") ;;
+  esac
+}
+
 loop() {
   local name="$1"
+  cmd_for "$name"
   activate
   mkdir -p logs data
   trap 'echo "Агент $name остановлен."; exit 0' INT TERM
   while true; do
     echo "[$(date '+%F %T')] Запуск агента $name"
-    python run_agent.py "$name"
+    "${CMD[@]}"
     code=$?
     case "$code" in
       0) echo "[$(date '+%F %T')] Агент $name завершился штатно." ;;

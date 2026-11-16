@@ -157,6 +157,8 @@ class Registry:
         if not wanted:
             return None
         for agent in await self.all(enabled_only=enabled_only):
+            if enabled_only and agent.kind == "service":
+                continue  # службы (voice_sip) не принимают задания-вопросы: к ним не обращаются как к агентам
             if wanted in (norm_name(agent.name), norm_name(agent.display_name)):
                 return agent
         return None
@@ -165,7 +167,7 @@ class Registry:
         """Все допустимые обращения к включённым агентам (display_name и agent_id) в нормализованном виде."""
         result: set[str] = set()
         for agent in await self.all(enabled_only=True):
-            if agent.name != exclude:
+            if agent.name != exclude and agent.kind != "service":
                 result |= {norm_name(agent.name), norm_name(agent.display_name)}
         return result
 
@@ -173,7 +175,7 @@ class Registry:
         return [AgentConfig.from_row(r) for r in await self._db.list_agents(enabled_only)]
 
     async def others(self, name: str) -> list[AgentConfig]:
-        return [a for a in await self.all(enabled_only=True) if a.name != name]
+        return [a for a in await self.all(enabled_only=True) if a.name != name and a.kind != "service"]
 
     async def identity_prompt(self, agent: AgentConfig) -> str:
         return identity_block(agent, await self.others(agent.name))
