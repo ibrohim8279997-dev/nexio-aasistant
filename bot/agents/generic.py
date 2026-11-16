@@ -41,7 +41,8 @@ _CITATION_RE = re.compile(r"【[^】]*】")
 class Plan(BaseModel):
     model_config = {"extra": "ignore", "str_strip_whitespace": True}
 
-    action: Literal["answer", "search", "ask_agent", "remember"]
+    action: Literal["answer", "search", "ask_agent", "remember", "call_owner"]
+    urgent: bool = False
     text: str | None = Field(default=None, max_length=6000)
     query: str | None = Field(default=None, max_length=500)
     agent: str | None = None
@@ -61,7 +62,7 @@ def parse_plan(raw: str, allowed_agents: set[str], search_allowed: bool) -> Plan
         plan = Plan.model_validate(json.loads(text[start : end + 1]))
     except (ValueError, ValidationError) as exc:
         raise PlanError(type(exc).__name__) from exc
-    if plan.action in ("answer", "remember") and not plan.text:
+    if plan.action in ("answer", "remember", "call_owner") and not plan.text:
         raise PlanError("пустой ответ")
     if plan.action == "search":
         if not search_allowed:
@@ -78,9 +79,10 @@ PLAN_PROMPT = """{identity}
 Сейчас: {now}.
 Реши, как ответить владельцу. Верни ТОЛЬКО JSON одного из видов:
 {{"action": "answer", "text": "готовый ответ"}}
-{search_line}{notes_line}{{"action": "ask_agent", "agent": "<имя или системное имя агента>", "question": "что спросить, с контекстом"}} — если нужны данные, которые ведёт другой агент (например, задачи, напоминания, статусы и ошибки агентов — у Кимо).
+{search_line}{notes_line}{call_line}{{"action": "ask_agent", "agent": "<имя или системное имя агента>", "question": "что спросить, с контекстом"}} — если нужны данные, которые ведёт другой агент (например, задачи, напоминания, статусы и ошибки агентов — у Кимо).
 Отвечай на языке владельца. Не выдумывай факты. Вопросы про текущие события, новости, цены, курсы, погоду, а также всё, в чём ты не уверен, решай через search, а не из памяти.{notes}"""
 
+CALL_LINE = '{"action": "call_owner", "text": "коротко, зачем", "urgent": false} — позвонить владельцу по телефону: только если он сам попросил позвонить или нужно срочно сообщить важное. Ночью (23:00-07:00) звонок возможен только с urgent=true.\n'
 NOTES_LINE = '{"action": "remember", "text": "что запомнить"} — если владелец просит запомнить заметку.\n'
 NOTES_TABLE = "agent_assistant_notes"  # собственная таблица ассистента (миграция 3)
 
@@ -126,6 +128,7 @@ class GenericAgent:
         system = PLAN_PROMPT.format(
             identity=identity, now=context_now_text(), search_line=SEARCH_LINE if self.search_allowed else "",
             notes_line=NOTES_LINE if self.has_notes else "",
+            call_line=CALL_LINE if self.can_call_owner else "",
             notes=("\nЗаметки владельца (последние):\n" + notes) if notes else "",
         )
         messages = [{"role": "system", "content": system}, {"role": "user", "content": text}]
@@ -140,6 +143,8 @@ class GenericAgent:
             return plan.text or ""
         if plan.action == "remember":
             return await self._remember(plan.text or "")
+        if plan.action == "call_owner":
+            return await self._call_owner(plan.text or "", plan.urgent, depth)
         if plan.action == "search":
             return await self._search(identity, text, plan.query or text)
         target = await self.ctx.registry.find(plan.agent or "", enabled_only=True)
@@ -170,6 +175,24 @@ class GenericAgent:
             return float(target.config.get("task_timeout_s", 60)) + 5.0
         except (TypeError, ValueError):
             return 65.0
+
+    @property
+    def can_call_owner(self) -> bool:
+        """Любой агент может попросить Кимо позвонить владельцу; отключается флагом can_call_owner=false в конфиге."""
+        return bool(self.ctx.agent.config.get("can_call_owner", True)) and self.ctx.bus is not None
+
+    async def _call_owner(self, reason: str, urgent: bool, depth: int) -> str:
+        if not self.can_call_owner:
+            return "Звонить владельцу мне не разрешено."
+        try:
+            await self.ctx.bus.request(
+                "kimo", {"type": "call_owner", "reason": reason[:200], "urgent": urgent}, depth=depth + 1, timeout=20
+            )
+        except DepthExceeded as exc:
+            return str(exc)
+        except BusError as exc:
+            return f"📞 Звонок не получился: {exc}"
+        return "📞 Попросил Кимо позвонить вам."
 
     @property
     def has_notes(self) -> bool:

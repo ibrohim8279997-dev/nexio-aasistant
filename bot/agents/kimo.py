@@ -5,6 +5,7 @@
 в Telegram (bot/services/pipeline.py), с теми же правами и теми же подтверждениями «да» только в Telegram."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 from aiogram.exceptions import TelegramAPIError
 
 from bot.agents.bus import BusError, NeedsClarification, chunks, plain_text
+from bot.agents.health import effective_status
 from bot.agents.context import AgentContext
 from bot.ai.actions import AddExpense, Clarify, ShowStats, build_messages, parse_actions
 from bot.ai.llm import LLMClient
@@ -20,7 +22,9 @@ from bot.ai.groq_client import GroqError
 from bot.services import assistant, pipeline
 from bot.services.rates import RatesService
 from bot.services.tasks import open_tasks_for_prompt
-from bot.timeutil import context_now_text, now_local, now_utc, to_db
+from bot.logging_setup import redact_text
+from bot.timeutil import TZ, context_now_text, from_db, now_local, now_utc, to_db
+from bot.voice.policy import check_call
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +69,9 @@ class KimoBusHandler:
         self.rates = rates
         self.settings = settings
         self.bot = bot
+        self.clock = now_local  # подменяется в тестах (ночное время)
+        self.call_wait = 75.0  # сколько ждать итог звонка (30 с на ответ + запас) перед сообщением в Telegram
+        self._background: set[asyncio.Task[None]] = set()
 
     async def voice_command(self, task: dict[str, Any]) -> str:
         """Фраза из звонка: полные права владельца, тот же путь, что у текста из Telegram. Результат — JSON для voice_sip."""
@@ -92,6 +99,60 @@ class KimoBusHandler:
         return json.dumps({"text": plain_text("\n\n".join(a.text for a in answers)), "answered_by": answered_by},
                           ensure_ascii=False)
 
+    async def _tell_owner(self, text: str) -> None:
+        if self.bot is None:
+            return
+        try:
+            for part in chunks(text):
+                await self.bot.send_message(self.settings.admin_id, part, parse_mode=None)
+        except TelegramAPIError as exc:
+            log.warning("Не удалось написать владельцу: %s", type(exc).__name__)
+
+    async def call_owner(self, task: dict[str, Any]) -> str:
+        """Любой агент просит позвонить владельцу. Звонит только Кимо: проверка правил, затем place_call службе звонков."""
+        payload = task["payload"]
+        reason = redact_text(str(payload.get("reason", "")).strip())[:200]
+        urgent = bool(payload.get("urgent"))
+        if not reason:
+            raise BusError("Для звонка нужна короткая причина")
+        who = task["from_agent"]
+        voice_row = await self.ctx.system_db.get_agent("voice_sip")
+        if voice_row is None or not voice_row["enabled"]:
+            await self._tell_owner(f"📞 Хотел позвонить ({who}): {reason}\nГолосовая служба не включена.")
+            raise BusError("Голосовая служба не включена")
+        last = await self.ctx.system_db.audit_list(limit=1, action="voice_call_out")
+        last_at = from_db(last[0]["ts"]).astimezone(TZ) if last else None
+        decision = check_call(self.clock(), last_at, urgent)
+        if not decision.ok:
+            await self._tell_owner(f"📞 Хотел позвонить ({who}): {reason}\nНе звоню: {decision.reason}.")
+            raise BusError(f"Звонок не выполнен: {decision.reason}. Причина отправлена в Telegram")
+        if effective_status(voice_row["last_seen"], voice_row["status"]) == "offline":
+            await self._tell_owner(f"📞 Хотел позвонить ({who}): {reason}\nГолосовая служба offline (проверьте ./run.sh status).")
+            raise BusError("Голосовая служба offline")
+        # попытка засчитывается сразу: два запроса подряд не дадут два звонка
+        await self.ctx.system_db.audit(to_db(now_utc()), self.ctx.agent.name, "voice_call_out", None,
+                                       {"from": who, "reason": reason, "urgent": urgent})
+        call_task = await self.ctx.bus.send(
+            "voice_sip", {"type": "place_call", "reason": reason, "urgent": urgent, "requested_by": who},
+            depth=int(task["depth"]) + 1, chat_id=self.settings.admin_id,
+        )
+        job = asyncio.get_running_loop().create_task(self._watch_call(call_task, reason, who))
+        self._background.add(job)
+        job.add_done_callback(self._background.discard)
+        return "Звонок владельцу поставлен в очередь"
+
+    async def _watch_call(self, call_task: int, reason: str, who: str) -> None:
+        """Не дозвонились (не ответил, Linphone спит, служба упала) — суть уходит владельцу сообщением в Telegram."""
+        try:
+            done = await self.ctx.bus.wait_result(call_task, timeout=self.call_wait, interval=0.5)
+        except BusError as exc:
+            await self._tell_owner(f"📞 Не дозвонился ({who}): {reason}\n{exc}")
+            return
+        await self.ctx.system_db.queue_mark_delivered(call_task)
+        if done["status"] == "failed":
+            why = (done["result"] or "причина неизвестна").removeprefix("⚠️").strip()
+            await self._tell_owner(f"📞 Не дозвонился ({who}): {reason}\nПричина: {why}")
+
     async def tg_message(self, task: dict[str, Any]) -> str:
         """Текст владельцу в Telegram по просьбе голосовой службы (расшифровка звонка, длинный ответ, поздний результат)."""
         if task["from_agent"] != VOICE_SERVICE:
@@ -117,6 +178,8 @@ class KimoBusHandler:
             return await self.voice_command(task)
         if kind == "tg_message":
             return await self.tg_message(task)
+        if kind == "call_owner":
+            return await self.call_owner(task)
         if kind != "ask":
             raise BusError(f"Кимо не понимает задание типа {kind}")
         text = str(payload.get("text", ""))[:1000]

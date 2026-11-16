@@ -24,6 +24,7 @@ from bot.agents.bus import Bus
 from bot.ai.llm import make_llm
 from bot.voice.asr import Recognizer
 from bot.voice.kimo_link import BusKimoLink, BusRelay
+from bot.voice.outbound import NoBot, OutboundCaller, ServiceWorker
 from bot.voice.service import VoiceService
 from bot.voice.session import CallSession, VoiceDeps
 from bot.voice.tts import Synthesizer
@@ -71,14 +72,21 @@ async def amain(selftest: bool) -> int:
         warm_task = asyncio.create_task(synth.warm_up())  # заготовка «сейчас не могу ответить»
         gate = IncomingGate(DigestAuthenticator(cfg.sip_user, cfg.sip_password, cfg.realm), AttemptGuard(), service.busy)
         stack = Pjsua2Stack(cfg, gate, service.on_incoming, loop)
+        caller = OutboundCaller(stack, service, deps)
+        worker = ServiceWorker(bus, caller.place, NoBot(), settings.admin_id, state=state)  # type: ignore[arg-type]
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
+        worker_task: asyncio.Task[None] | None = None
         try:
             stack.start()
+            worker_task = asyncio.create_task(worker.run())
             log.info("voice_sip запущен")
             await stop.wait()
         finally:
+            worker.stop()
+            if worker_task is not None:
+                await asyncio.gather(worker_task, return_exceptions=True)
             stack.stop()
             heartbeat.stop()
             warm_task.cancel()
