@@ -23,6 +23,31 @@ log = logging.getLogger("voice.sip")
 CODEC_PRIORITY = (("opus/", 255), ("PCMU/", 254), ("PCMA/", 253))  # остальные кодеки выключены
 
 
+def _safe(func):
+    """Исключение в колбэке pjsua2 (поток pjsip) уходит только в stderr и теряется: пишем его в лог голосовой службы."""
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка в колбэке pjsua2: %s", func.__name__)
+            return None
+
+    return wrapper
+
+
+def _auth_summary(authorization: str | None) -> str:
+    """Что прислал клиент в Authorization: только имя и realm (ответ-хеш и пароль в лог не попадают)."""
+    from bot.voice.digest import parse_digest
+
+    params = parse_digest(authorization)
+    if params is None:
+        return "Authorization нет" if not authorization else "Authorization не Digest"
+    return f"Authorization есть: username={params.get('username', '?')!r} realm={params.get('realm', '?')!r} uri={params.get('uri', '?')!r}"
+
+
 def _host(src_address: str) -> str:
     """'100.64.0.5:5060' или '[::1]:5060' -> адрес без порта."""
     host = src_address.rsplit(":", 1)[0]
@@ -142,19 +167,25 @@ class Pjsua2Stack:
                 self._h = handle
 
             def onFrameRequested(self, frame):  # noqa: N802 — имя задано pjsua2
-                data = self._h.pop_frame()
-                if data is None:
-                    frame.type = pj.PJMEDIA_FRAME_TYPE_NONE
-                    frame.size = 0
-                    return
-                frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO
-                frame.buf = stack._to_bytevec(data)
-                frame.size = len(data)
+                try:
+                    data = self._h.pop_frame()
+                    if data is None:
+                        frame.type = pj.PJMEDIA_FRAME_TYPE_NONE
+                        frame.size = 0
+                        return
+                    frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO
+                    frame.buf = stack._to_bytevec(data)
+                    frame.size = len(data)
+                except Exception:  # noqa: BLE001
+                    log.exception("Ошибка в onFrameRequested")
 
             def onFrameReceived(self, frame):  # noqa: N802
-                if frame.size:
-                    data = bytes(b & 0xFF for b in list(frame.buf)[: frame.size])
-                    self._h.emit("on_audio", data)
+                try:
+                    if frame.size:
+                        data = bytes(b & 0xFF for b in list(frame.buf)[: frame.size])
+                        self._h.emit("on_audio", data)
+                except Exception:  # noqa: BLE001
+                    log.exception("Ошибка в onFrameReceived")
 
         class Call(pj.Call):
             def __init__(self, account, call_id=pj.PJSUA_INVALID_ID):
@@ -221,11 +252,13 @@ class Pjsua2Stack:
 
     # ---------- события pjsip (потоки pjsip) ----------
 
+    @_safe
     def _on_incoming_call(self, account: Any, prm: Any) -> None:
         pj = self.pj
         call = self._Call(account, prm.callId)
         src = _host(prm.rdata.srcAddress)
-        decision = self.gate.decide(src, "INVITE", extract_authorization(prm.rdata.wholeMsg))
+        authorization = extract_authorization(prm.rdata.wholeMsg)
+        decision = self.gate.decide(src, "INVITE", authorization)
         op = pj.CallOpParam()
         op.statusCode = decision.code
         if decision.www_authenticate:
@@ -234,7 +267,9 @@ class Pjsua2Stack:
             header.hValue = decision.www_authenticate
             op.txOption.headers.append(header)
         info = call.getInfo()
-        log.info("Входящий INVITE от %s: %d (%s)", src, decision.code, decision.reason)
+        log.info("Входящий INVITE от %s: %d (%s); %s", src, decision.code, decision.reason, _auth_summary(authorization))
+        if decision.www_authenticate:
+            log.info("Отправляю 401 с вызовом: %s", decision.www_authenticate)  # nonce одноразовый, не секрет
         self._keep[info.id] = call
         if decision.code == 200:
             handle = _Handle(self, "in", src)
@@ -243,6 +278,7 @@ class Pjsua2Stack:
             self.loop.call_soon_threadsafe(self._attach_handler, handle)
         call.answer(op)
 
+    @_safe
     def _attach_handler(self, handle: _Handle) -> None:
         try:
             handle.bind(self._on_incoming(handle))
@@ -250,6 +286,7 @@ class Pjsua2Stack:
             log.exception("Не удалось создать обработчик звонка")
             handle.hangup()
 
+    @_safe
     def _on_state(self, call: Any) -> None:
         pj = self.pj
         info = call.getInfo()
@@ -269,6 +306,7 @@ class Pjsua2Stack:
         elif info.state == pj.PJSIP_INV_STATE_CONFIRMED:
             handle.emit("on_connected")
 
+    @_safe
     def _on_media(self, call: Any) -> None:
         pj = self.pj
         info = call.getInfo()

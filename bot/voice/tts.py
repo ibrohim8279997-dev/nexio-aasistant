@@ -22,6 +22,7 @@ MAX_SPOKEN_CHARS = 350
 MAX_SPOKEN_LINES = 6
 FIRST_SENTENCE_CHARS = 200
 SYNTH_TIMEOUT = 25.0
+EDGE_ATTEMPTS = 3  # NoAudioReceived у edge-tts бывает разовым
 DETAILS = {"ru": "Подробности отправил в чат.", "uz": "Batafsil ma'lumotni chatga yubordim."}
 UNAVAILABLE = {"ru": "Сейчас не могу ответить.", "uz": "Hozir javob bera olmayman."}
 
@@ -120,20 +121,27 @@ async def edge_mp3(text: str, voice: str) -> bytes:
         import edge_tts  # noqa: PLC0415
     except ImportError as exc:
         raise TtsUnavailable("edge-tts не установлен") from exc
-    data = bytearray()
+    last = "пустой звук"
+    for attempt in range(1, EDGE_ATTEMPTS + 1):
+        data = bytearray()
 
-    async def collect() -> None:
-        async for chunk in edge_tts.Communicate(text, voice).stream():
-            if chunk.get("type") == "audio":
-                data.extend(chunk["data"])
+        async def collect() -> None:
+            async for chunk in edge_tts.Communicate(text, voice).stream():
+                if chunk.get("type") == "audio":
+                    data.extend(chunk["data"])
 
-    try:
-        await asyncio.wait_for(collect(), timeout=SYNTH_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001 — сеть, блокировка сервиса, таймаут
-        raise TtsUnavailable(f"edge-tts: {type(exc).__name__}") from exc
-    if not data:
-        raise TtsUnavailable("edge-tts вернул пустой звук")
-    return bytes(data)
+        try:
+            await asyncio.wait_for(collect(), timeout=SYNTH_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — сеть, блокировка сервиса, таймаут, NoAudioReceived
+            last = type(exc).__name__
+        else:
+            if data:
+                return bytes(data)
+            last = "пустой звук"
+        log.warning("edge-tts: попытка %d из %d не удалась (%s)", attempt, EDGE_ATTEMPTS, last)
+        if attempt < EDGE_ATTEMPTS:
+            await asyncio.sleep(0.6 * attempt)
+    raise TtsUnavailable(f"edge-tts: {last}")
 
 
 async def _ffmpeg(args: list[str], data: bytes) -> bytes:
@@ -143,6 +151,8 @@ async def _ffmpeg(args: list[str], data: bytes) -> bytes:
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, err = await asyncio.wait_for(proc.communicate(data), timeout=SYNTH_TIMEOUT)
+    except FileNotFoundError as exc:
+        raise TtsUnavailable("ffmpeg не найден в PATH (в Debian: apt install -y ffmpeg)") from exc
     except (OSError, asyncio.TimeoutError) as exc:
         raise TtsUnavailable(f"ffmpeg: {type(exc).__name__}") from exc
     if proc.returncode != 0 or not out:

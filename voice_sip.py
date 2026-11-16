@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import shutil
 import signal
 import sys
 
@@ -57,6 +58,8 @@ async def amain(selftest: bool) -> int:
         except ImportError as exc:  # pragma: no cover
             raise ConfigError(f"Не импортируется pjsua2: {exc}") from exc
 
+        if shutil.which("ffmpeg") is None:
+            log.error("ffmpeg не найден в PATH: озвучка работать не будет. В Debian (proot): apt install -y ffmpeg")
         loop = asyncio.get_running_loop()
         state = AgentState()
         heartbeat = Heartbeat(db, NAME, state)
