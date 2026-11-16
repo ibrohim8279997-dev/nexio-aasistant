@@ -41,7 +41,7 @@ DEPTH_MESSAGE = (
     "Уточните, кто должен её выполнить."
 )
 TG_LIMIT = 4000
-ASK_TYPES = {"ask"}
+ASK_TYPES = {"ask", "voice_command"}
 
 
 class BusError(Exception):

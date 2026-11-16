@@ -13,15 +13,14 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from bot.ai.actions import ActionParseError, build_messages, parse_actions
 from bot.agents.context import AgentContext
 from bot.ai.groq_client import GroqClient, GroqError
 from bot.config import Settings
 from bot.db import Database
-from bot.services import assistant
+from bot.services import assistant, pipeline
 from bot.services.rates import RatesService
-from bot.services.tasks import open_tasks_for_prompt
-from bot.timeutil import context_now_text, now_local
+from bot.agents.bus import plain_text
+from bot.voice.tg import voice_reply
 
 log = logging.getLogger(__name__)
 router = Router(name="assistant")
@@ -79,38 +78,29 @@ async def make_deps(
     )
 
 
-async def process_text(message: Message, text: str, bot: Bot, groq: GroqClient, deps: assistant.AssistantDeps) -> None:
+async def process_text(message: Message, text: str, bot: Bot, groq: GroqClient, deps: assistant.AssistantDeps) -> list[str]:
+    """Обработать фразу и ответить. Возвращает тексты ответов (для голосового ответа в Telegram)."""
     text = text.strip()
     if not text:
-        return
+        return []
     if len(text) > MAX_TEXT_LEN:
         await send(message, f"Сообщение слишком длинное (максимум {MAX_TEXT_LEN} символов).")
-        return
+        return []
 
     await _typing(bot, message.chat.id)
-    open_tasks = await open_tasks_for_prompt(deps.db, deps.user["id"])
-    # Передавать задачи может только владелец: агенты — его помощники
-    agents = None
-    if deps.ctx is not None and deps.is_owner:
-        agents = await deps.ctx.registry.aliases(exclude=deps.ctx.agent.name)
     try:
-        raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks, deps.identity))
-        actions = parse_actions(raw, now_local().date(), agents)
+        answers = await pipeline.interpret(text, groq, deps)
     except GroqError as exc:
         if deps.ctx is not None:
             deps.ctx.state.set_error(f"Groq: {type(exc).__name__}")
         await send(message, exc.user_message)
-        return
-    except ActionParseError as exc:
-        log.info("Не удалось разобрать ответ модели: %s", exc)
+        return []
+    except pipeline.NotUnderstood:
         await send(message, NOT_UNDERSTOOD)
-        return
-
-    if not actions:
-        await send(message, NOT_UNDERSTOOD)
-        return
-    for answer in await assistant.execute(actions, deps):
+        return []
+    for answer in answers:
         await send(message, answer.text, answer.markup)
+    return [plain_text(a.text) for a in answers]
 
 
 @router.message(F.voice | F.audio)
@@ -124,6 +114,7 @@ async def on_voice(
     db_user: dict[str, Any],
     agent_ctx: AgentContext,
     settings: Settings,
+    synth: Any = None,
 ) -> None:
     await state.clear()
     media = message.voice or message.audio
@@ -153,7 +144,9 @@ async def on_voice(
         return
 
     await send(message, f"🎙 <i>{escape(text[:MAX_TEXT_LEN])}</i>")
-    await process_text(message, text, bot, groq, await make_deps(message, db, db_user, rates, agent_ctx, settings))
+    replies = await process_text(message, text, bot, groq, await make_deps(message, db, db_user, rates, agent_ctx, settings))
+    if replies:  # голосом можно общаться и в Telegram: текст выше, озвученный ответ ниже
+        await voice_reply(message, "\n".join(replies), synth)
 
 
 @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))

@@ -20,7 +20,13 @@ from bot.db import Database
 from bot.logging_setup import setup_logging
 from bot.voice.config import VoiceConfig
 from bot.voice.digest import AttemptGuard, DigestAuthenticator, IncomingGate
-from bot.voice.service import LoggingSession, VoiceService
+from bot.agents.bus import Bus
+from bot.ai.llm import make_llm
+from bot.voice.asr import Recognizer
+from bot.voice.kimo_link import BusKimoLink, BusRelay
+from bot.voice.service import VoiceService
+from bot.voice.session import CallSession, VoiceDeps
+from bot.voice.tts import Synthesizer
 
 log = logging.getLogger("voice")
 NAME = "voice_sip"
@@ -55,7 +61,14 @@ async def amain(selftest: bool) -> int:
         heartbeat = Heartbeat(db, NAME, state)
         await heartbeat.beat()
         hb_task = asyncio.create_task(heartbeat.run())
-        service = VoiceService(cfg, db, state, LoggingSession)
+        llm = make_llm(settings, "groq", None, agent.stt_model or settings.stt_model)  # один ключ Groq на все агенты
+        bus = Bus(db, NAME, owner_id=settings.admin_id, display=agent.display_name)
+        relay = BusRelay(bus, settings.admin_id)
+        synth = Synthesizer(cfg.voice_ru, cfg.voice_uz)
+        deps = VoiceDeps(Recognizer(llm), synth, None, relay, cfg)  # type: ignore[arg-type]
+        service = VoiceService(cfg, db, state, lambda call, svc: CallSession(call, svc, deps))
+        deps.kimo = BusKimoLink(bus, db, relay, service, cfg.answer_wait_seconds, settings.admin_id)
+        warm_task = asyncio.create_task(synth.warm_up())  # заготовка «сейчас не могу ответить»
         gate = IncomingGate(DigestAuthenticator(cfg.sip_user, cfg.sip_password, cfg.realm), AttemptGuard(), service.busy)
         stack = Pjsua2Stack(cfg, gate, service.on_incoming, loop)
         stop = asyncio.Event()
@@ -68,7 +81,9 @@ async def amain(selftest: bool) -> int:
         finally:
             stack.stop()
             heartbeat.stop()
-            await asyncio.gather(hb_task, return_exceptions=True)
+            warm_task.cancel()
+            await asyncio.gather(hb_task, warm_task, return_exceptions=True)
+            await llm.close()
         return EXIT_OK
     finally:
         await db.close()

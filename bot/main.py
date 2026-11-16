@@ -22,6 +22,7 @@ from bot.ai.llm import LLMClient
 from bot.config import Settings
 from bot.crypto import Crypto, SecretStore
 from bot.handlers import get_routers
+from bot.voice.tg import synthesizer_from_env
 from bot.middlewares import AccessMiddleware, GroupGuardMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.services.rates import RatesService
 from bot.services.scheduler import BotScheduler
@@ -107,9 +108,10 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
     confirm = Confirmations(ctx.system_db, agent.name, ops, settings.admin_id)
     ctx.admin = AdminActions(ctx, ops, confirm, bot)
     ctx.admin.selfheal = SelfHeal(ctx, ops, confirm)
-    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx, confirm=confirm)
+    dp = build_dispatcher(settings, db=scoped, secrets=secrets, groq=llm, rates=rates, agent_ctx=ctx, confirm=confirm,
+                          synth=synthesizer_from_env())
     scheduler = BotScheduler(bot, scoped, settings, system_db=ctx.system_db)  # type: ignore[arg-type]
-    worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings), bot, settings.admin_id, state=ctx.state)
+    worker = BusWorker(ctx.bus, KimoBusHandler(ctx, scoped, llm, rates, settings, bot), bot, settings.admin_id, state=ctx.state)
     watchdog = Watchdog(ctx.system_db, ctx.registry, make_notifier(bot, settings.admin_id, ctx.admin), own_agent=agent.name)
     worker_task: asyncio.Task[None] | None = None
     watchdog_task: asyncio.Task[None] | None = None

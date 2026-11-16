@@ -277,10 +277,13 @@ DEFAULT_IDENTITY = "Ты — Кимо, личный ассистент влад�
 
 
 def build_messages(
-    user_text: str, now_text: str, open_tasks: list[str], identity: str = ""
+    user_text: str, now_text: str, open_tasks: list[str], identity: str = "", history: list[tuple[str, str]] | None = None
 ) -> list[dict[str, str]]:
     tasks_block = "\n".join(open_tasks) if open_tasks else "(нет)"
     system = SYSTEM_PROMPT.format(identity=identity or DEFAULT_IDENTITY, now=now_text, tasks=tasks_block)
+    if history:  # предыдущие реплики голосового звонка: чтобы работало «а теперь сделай это завтра»
+        turns = "\n".join(f"Владелец: {u[:300]}\nТы: {k[:300]}" for u, k in history[-3:])
+        system += f"\n\nПредыдущие реплики этого разговора:\n{turns}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user_text},

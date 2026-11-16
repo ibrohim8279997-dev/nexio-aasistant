@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from html import escape
 from typing import Any
@@ -64,6 +64,7 @@ class AssistantDeps:
     is_owner: bool = False
     offer_restart: Any = None  # async (AgentConfig, text) -> str: предложить перезапуск с подтверждением
     admin: Any = None  # AdminActions
+    consulted: list[str] = field(default_factory=list)  # какие агенты отвечали (для audit_log голосовых обращений)
 
 
 async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
@@ -164,6 +165,7 @@ async def _delegate(action: Delegate, deps: AssistantDeps) -> Answer:
         if deps.offer_restart is not None:
             return Answer(escape(await deps.offer_restart(target, text)))
         return Answer(text + f"\nЗапустить агента: /agenton {target.name}")
+    deps.consulted.append(target.name)
     context = {
         "from": ctx.agent.name, "from_name": ctx.agent.display_name, "owner_request": action.task[:500],
         "about": action.task[:300], "need": f"выполнить задачу владельца: {action.task[:300]}",

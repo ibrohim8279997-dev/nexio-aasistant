@@ -27,6 +27,7 @@ from bot.agents.registry import TOKEN_RE, norm_name
 from bot.ai.groq_client import GroqError, GroqSearchError
 from bot.ai.llm import LLMClient
 from bot.config import Settings
+from bot.voice.tg import synthesizer_from_env, voice_reply
 from bot.middlewares import ThrottlingMiddleware
 from bot.timeutil import context_now_text
 
@@ -104,6 +105,7 @@ class GenericAgent:
         self.ctx = ctx
         self.llm = llm
         self.settings = settings
+        self.synth = synthesizer_from_env()
 
     @property
     def name(self) -> str:
@@ -311,7 +313,7 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
         a = agent.ctx.agent
         await message.answer(f"Я {a.display_name}. {a.role}", parse_mode=None)
 
-    async def reply_answer(message: Message, bot: Bot, text: str) -> None:
+    async def reply_answer(message: Message, bot: Bot, text: str) -> str:
         try:
             await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
         except TelegramAPIError:
@@ -330,6 +332,7 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
                 await message.reply(part, parse_mode=None)
             else:
                 await message.answer(part, parse_mode=None)
+        return answer
 
     @router.message(F.voice | F.audio)
     async def on_voice(message: Message, bot: Bot) -> None:
@@ -353,7 +356,8 @@ def build_router(agent: GenericAgent, bot_id: int, username: str | None) -> Rout
             return
         if text:
             await message.answer(f"🎙 {text[:MAX_TEXT_LEN]}", parse_mode=None)
-            await reply_answer(message, bot, text)
+            answer = await reply_answer(message, bot, text)
+            await voice_reply(message, answer, agent.synth)  # голосовой ответ в Telegram (VOICE_TG_REPLY=false отключает)
 
     @router.message(F.text, ~F.text.startswith("/"))
     async def on_text(message: Message, bot: Bot) -> None:
