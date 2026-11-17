@@ -143,6 +143,8 @@ def probe(host: str, cfg: VoiceConfig) -> bool:
         sock.sendto(request("BYE", cfg.sip_user, host, cfg.sip_port, host, lport, callid, tag, 3, tt).encode(), dest)
         print("  (звонок закрыт командой BYE)")
     else:
+        if status(final).startswith("SIP/2.0 486"):
+            print("  486 = линия занята другим звонком (идёт разговор или завершается предыдущая проверка). Повторите через минуту.")
         print("  Ответ целиком:\n" + "\n".join("  " + ln for ln in final.splitlines()[:20]))
     sock.close()
     return accepted
@@ -155,7 +157,11 @@ def main() -> int:
         print(f"Ошибка конфигурации: {exc}")
         return 2
     hosts = sys.argv[1:] or ["127.0.0.1", cfg.bind_address]
-    results = [probe(h, cfg) for h in dict.fromkeys(hosts)]
+    results = []
+    for index, host in enumerate(dict.fromkeys(hosts)):
+        if index:
+            time.sleep(2)  # служба принимает один звонок за раз: даём завершиться предыдущей проверке
+        results.append(probe(host, cfg))
     print("\nИТОГ:", "сервер принимает звонки с паролем, ищите причину в настройке Linphone" if all(results)
           else "есть проблемы на стороне сервера, пришлите вывод целиком")
     return 0 if all(results) else 1
