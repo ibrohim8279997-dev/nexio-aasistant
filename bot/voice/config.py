@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -67,6 +68,9 @@ class VoiceConfig:
                 raise ConfigError("SIP_BIND_ADDRESS: некорректный IP-адрес") from exc
             if ip not in TAILSCALE_NET:
                 raise ConfigError("SIP_BIND_ADDRESS должен быть адресом Tailscale (100.64.0.0/10): слушать на других адресах нельзя")
+        realm = os.getenv("SIP_REALM", "kimo").strip() or "kimo"
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", realm):
+            raise ConfigError("SIP_REALM: латиница, цифры, точки, дефисы и подчёркивания, до 64 символов")
         voice_ru = os.getenv("VOICE_RU", "svetlana").strip().lower()
         voice_uz = os.getenv("VOICE_UZ", "madina").strip().lower()
         if voice_ru not in ("svetlana", "dmitry") or voice_uz not in ("madina", "sardor"):
@@ -84,6 +88,7 @@ class VoiceConfig:
             outbound_ring_seconds=_int("VOICE_RING_SECONDS", 30, 10, 60),
             voice_ru=voice_ru,
             voice_uz=voice_uz,
+            realm=realm,
         )
 
     @property

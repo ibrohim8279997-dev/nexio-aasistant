@@ -3,8 +3,9 @@
     python scripts/sip_probe.py                  — на 127.0.0.1 и на SIP_BIND_ADDRESS
     python scripts/sip_probe.py 100.119.11.24    — на указанный адрес
 
-Шаги: OPTIONS -> INVITE без пароля (ждём 401 с WWW-Authenticate) -> INVITE с паролем (ждём 200 OK) -> BYE.
-Пароль берётся из .env и никуда не печатается. Если проходит всё, сервер в порядке, проблема в настройке Linphone."""
+Шаги: OPTIONS (необязательный: pjsua2 может его игнорировать) -> INVITE без пароля (ждём 401 с WWW-Authenticate)
+-> INVITE с паролем (ждём 200 OK) -> BYE. Пароль берётся из .env и никуда не печатается.
+Если проходит всё, сервер в порядке и проблема в настройке Linphone."""
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.config import ConfigError  # noqa: E402
 from bot.voice.config import VoiceConfig  # noqa: E402
+
+INVITE_ATTEMPTS = 3  # служба могла ещё запускаться: повторяем звонок с паузой
 
 
 def md5(text: str) -> str:
@@ -81,31 +84,46 @@ def probe(host: str, cfg: VoiceConfig) -> bool:
         return False
     lport = sock.getsockname()[1]
     dest = (host, cfg.sip_port)
-    ok = True
 
+    # OPTIONS — только для сведения: pjsua2 может не отвечать на него, это не ошибка
     sock.sendto(request("OPTIONS", cfg.sip_user, host, cfg.sip_port, host, lport, "p-opt-" + os.urandom(3).hex(), "o1", 1).encode(), dest)
-    got = collect(sock, 3)
-    print(("✔ " if got else "✖ ") + "OPTIONS: " + (status(got[-1]) if got else "нет ответа (служба не слушает этот адрес?)"))
-    if not got:
+    got = collect(sock, 2)
+    if got:
+        print("✔ OPTIONS: " + status(got[-1]))
+    else:
+        print("· OPTIONS: ответа нет (служба может игнорировать OPTIONS — проверяю настоящим звонком)")
+
+    final, callid, tag = "", "", ""
+    for attempt in range(1, INVITE_ATTEMPTS + 1):
+        callid, tag = "probe-" + os.urandom(4).hex(), "t" + os.urandom(3).hex()
+        sock.sendto(request("INVITE", cfg.sip_user, host, cfg.sip_port, host, lport, callid, tag, 1, body=sdp(host)).encode(), dest)
+        got = collect(sock, 4)
+        if got:
+            final = got[-1]
+            break
+        if attempt < INVITE_ATTEMPTS:
+            print(f"  INVITE без ответа, повтор {attempt + 1} из {INVITE_ATTEMPTS} (служба могла ещё запускаться)…")
+            time.sleep(2)
+    if not final:
+        print("✖ INVITE: нет ответа — служба не слушает этот адрес или не запущена (смотрите ./run.sh logs voice_sip)")
         return False
 
-    callid, tag = "probe-" + os.urandom(4).hex(), "t" + os.urandom(3).hex()
-    sock.sendto(request("INVITE", cfg.sip_user, host, cfg.sip_port, host, lport, callid, tag, 1, body=sdp(host)).encode(), dest)
-    got = collect(sock, 4)
-    final = got[-1] if got else ""
     challenge = header(final, "WWW-Authenticate")
     print(f"{'✔' if status(final).startswith('SIP/2.0 401') else '✖'} INVITE без пароля: {status(final)}")
+    if status(final).startswith("SIP/2.0 200"):
+        print("✖ сервер принял звонок БЕЗ пароля — так быть не должно, пришлите этот вывод мне")
+        return False
     if not challenge:
-        print("✖ в ответе 401 НЕТ заголовка WWW-Authenticate: Linphone не поймёт, что нужен пароль. Пришлите этот вывод мне.")
+        print("✖ в ответе НЕТ заголовка WWW-Authenticate: Linphone не поймёт, что нужен пароль. Пришлите этот вывод мне.")
         print("  Ответ целиком:\n" + "\n".join("  " + ln for ln in final.splitlines()[:20]))
         return False
-    print(f"✔ WWW-Authenticate: {challenge}")
+    print(f"✔ WWW-Authenticate получен, realm={re.search(r'realm=\"?([^\",]+)', challenge).group(1)!r}")
     to_tag = re.search(r"(?i)^To:.*;tag=([^;>\s]+)", final, re.M)
     sock.sendto(request("ACK", cfg.sip_user, host, cfg.sip_port, host, lport, callid, tag, 1,
                         to_tag.group(1) if to_tag else None).encode(), dest)
 
     nonce = re.search(r'nonce="([^"]+)"', challenge).group(1)
-    realm = (re.search(r'realm="([^"]+)"', challenge) or re.search(r"realm=(\w+)", challenge)).group(1)
+    realm = (re.search(r'realm="([^"]+)"', challenge) or re.search(r"realm=([\w.-]+)", challenge)).group(1)
     uri = f"sip:{cfg.sip_user}@{host}:{cfg.sip_port}"
     nc, cnonce = "00000001", os.urandom(4).hex()
     ha1, ha2 = md5(f"{cfg.sip_user}:{realm}:{cfg.sip_password}"), md5(f"INVITE:{uri}")
@@ -116,7 +134,6 @@ def probe(host: str, cfg: VoiceConfig) -> bool:
     got = collect(sock, 6)
     final = got[-1] if got else ""
     accepted = status(final).startswith("SIP/2.0 200")
-    ok = ok and accepted
     print(f"{'✔' if accepted else '✖'} INVITE с верным паролем: {status(final)}" + ("" if got else " (нет ответа)"))
     if accepted:
         to_tag = re.search(r"(?i)^To:.*;tag=([^;>\s]+)", final, re.M)
@@ -128,7 +145,7 @@ def probe(host: str, cfg: VoiceConfig) -> bool:
     else:
         print("  Ответ целиком:\n" + "\n".join("  " + ln for ln in final.splitlines()[:20]))
     sock.close()
-    return ok
+    return accepted
 
 
 def main() -> int:

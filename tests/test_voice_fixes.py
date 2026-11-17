@@ -29,9 +29,9 @@ def load_probe():
 class FakeSipServer(threading.Thread):
     """Минимальный UDP-сервер, отвечающий через настоящий IncomingGate (как адаптер pjsua2)."""
 
-    def __init__(self, gate, with_challenge=True):
+    def __init__(self, gate, with_challenge=True, ignore_options=False):
         super().__init__(daemon=True)
-        self.gate, self.with_challenge = gate, with_challenge
+        self.gate, self.with_challenge, self.ignore_options = gate, with_challenge, ignore_options
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", 0))
         self.port = self.sock.getsockname()[1]
@@ -57,6 +57,8 @@ class FakeSipServer(threading.Thread):
             cseq = re.search(r"(?im)^CSeq:.*$", text).group(0)
             tag = ";tag=srv1" if ";tag=" not in to else ""
             if method == "OPTIONS":
+                if self.ignore_options:
+                    continue  # pjsua2 так и делает: молчит на OPTIONS
                 status, extra = "200 OK", ""
             else:
                 auth = re.search(r"(?im)^Authorization:[ \t]*(.+)$", text)
@@ -93,6 +95,38 @@ def test_probe_script_passes_against_correct_server(capsys):
     assert "INVITE без пароля: SIP/2.0 401" in out and "WWW-Authenticate" in out and "с верным паролем: SIP/2.0 200" in out
     assert "correct-horse-1" not in out  # пароль не печатается
     assert server.seen.count("INVITE") == 2 and "BYE" in server.seen
+
+
+def test_probe_works_when_server_ignores_options(capsys):
+    """pjsua2 не отвечает на OPTIONS: проверка всё равно идёт звонком и проходит."""
+    probe = load_probe()
+    server = make_server(cfg_for(sip_user="kimo_ai", sip_password="correct-horse-1"), ignore_options=True)
+    try:
+        cfg = cfg_for(sip_user="kimo_ai", sip_password="correct-horse-1", sip_port=server.port)
+        assert probe.probe("127.0.0.1", cfg) is True
+    finally:
+        server.stop()
+    out = capsys.readouterr().out
+    assert "OPTIONS: ответа нет" in out and "не ошибка" not in out  # мягкая пометка «·», не крест
+    assert "· OPTIONS" in out and "с верным паролем: SIP/2.0 200" in out
+
+
+def test_realm_configurable_from_env(monkeypatch):
+    from tests.test_voice_stage1 import env
+
+    env(monkeypatch)
+    monkeypatch.setenv("SIP_REALM", "100.119.11.24")
+    from bot.voice.config import VoiceConfig
+
+    assert VoiceConfig.from_env().realm == "100.119.11.24"
+    monkeypatch.setenv("SIP_REALM", 'bad"realm')
+    import pytest as _pytest
+
+    from bot.config import ConfigError
+
+    with _pytest.raises(ConfigError):
+        VoiceConfig.from_env()
+    monkeypatch.delenv("SIP_REALM")
 
 
 def test_probe_script_detects_missing_challenge(capsys):
