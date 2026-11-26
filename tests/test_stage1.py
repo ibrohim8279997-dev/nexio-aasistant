@@ -7,7 +7,7 @@ import pytest
 
 from bot.ai.groq_client import GroqRateLimitError
 from bot.ai.queue import P_BACKGROUND, P_CLIENT, P_OWNER, LLMQueue, QueuedLLM, UserLimitError, UserLimiter
-from bot.db import Database
+from bot.db import MIGRATIONS, Database
 from bot.services import expenses as exp
 from bot.services import perms
 from bot.timeutil import now_utc, to_db
@@ -26,7 +26,7 @@ async def test_migration4_up_down_idempotent(tmp_path):
     db = await Database.connect(tmp_path / "m.db")
     await db.migrate()
     await db.migrate()  # повторный запуск ничего не ломает
-    assert await db.schema_version() == 4
+    assert await db.schema_version() == len(MIGRATIONS)
     u = await make_user(db, 5)
     await db.add_expense(u["id"], 10, "UZS", "Еда", None, None, NOW())
     await db.downgrade(3)
@@ -36,7 +36,7 @@ async def test_migration4_up_down_idempotent(tmp_path):
     row = await db._one("SELECT COUNT(*) AS n FROM expenses")
     assert row["n"] == 1  # данные расходов сохранены
     await db.migrate()
-    assert await db.schema_version() == 4
+    assert await db.schema_version() == len(MIGRATIONS)
     assert list((tmp_path / "backups").glob("*.db"))  # бэкапы перед миграцией
     await db.close()
 

@@ -18,7 +18,11 @@
     "payments",
     "rates_cache",
     "user_perms",
-    "user_settings"
+    "user_settings",
+    "business_connections",
+    "business_rules",
+    "business_chats",
+    "business_messages"
   ],
   "allowed_commands": [
     "start",
@@ -31,7 +35,11 @@
     "subscription",
     "paysupport",
     "help",
-    "agents"
+    "agents",
+    "pause",
+    "resume",
+    "brules",
+    "bchats"
   ],
   "deny_rules": [
     "Не раскрывать токены, ключи и содержимое .env",

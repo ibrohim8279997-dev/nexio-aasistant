@@ -223,6 +223,64 @@ MIGRATIONS: list[str] = [
             UNION SELECT 'user_perms' UNION SELECT 'user_settings')
     ) WHERE name = 'kimo' AND json_valid(allowed_tables);
     """,
+    # 5: Telegram Business — подключения, правила, чаты клиентов, журнал диалогов
+    """
+    CREATE TABLE IF NOT EXISTS business_connections (
+        connection_id TEXT PRIMARY KEY,
+        owner_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        user_chat_id  INTEGER,
+        can_reply     INTEGER NOT NULL DEFAULT 0,
+        is_enabled    INTEGER NOT NULL DEFAULT 1,
+        ai_enabled    INTEGER NOT NULL DEFAULT 1,
+        updated_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bconn_owner ON business_connections(owner_id);
+
+    CREATE TABLE IF NOT EXISTS business_rules (
+        owner_id      INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        system_prompt TEXT NOT NULL DEFAULT '',
+        business_info TEXT NOT NULL DEFAULT '',
+        prohibitions  TEXT NOT NULL DEFAULT '',
+        tone          TEXT NOT NULL DEFAULT '',
+        owner_name    TEXT NOT NULL DEFAULT '',
+        pause_hours   INTEGER NOT NULL DEFAULT 6,
+        flood_per_min INTEGER NOT NULL DEFAULT 6,
+        updated_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS business_chats (
+        owner_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        chat_id          INTEGER NOT NULL,
+        client_name      TEXT,
+        username         TEXT,
+        excluded         INTEGER NOT NULL DEFAULT 0,
+        paused_until     TEXT,
+        intro_sent       INTEGER NOT NULL DEFAULT 0,
+        last_incoming_at TEXT,
+        last_owner_at    TEXT,
+        created_at       TEXT NOT NULL,
+        PRIMARY KEY (owner_id, chat_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS business_messages (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        chat_id    INTEGER NOT NULL,
+        role       TEXT NOT NULL CHECK (role IN ('client', 'assistant', 'owner')),
+        text       TEXT NOT NULL,
+        tg_msg_id  INTEGER,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bmsg_chat ON business_messages(owner_id, chat_id, id);
+    CREATE INDEX IF NOT EXISTS idx_bmsg_created ON business_messages(created_at);
+
+    UPDATE agents SET allowed_tables = (
+        SELECT json_group_array(value) FROM (
+            SELECT value FROM json_each(agents.allowed_tables)
+            UNION SELECT 'business_connections' UNION SELECT 'business_rules'
+            UNION SELECT 'business_chats' UNION SELECT 'business_messages')
+    ) WHERE name = 'kimo' AND json_valid(allowed_tables);
+    """,
 ]
 
 # Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
@@ -242,6 +300,10 @@ DOWN_MIGRATIONS: dict[int, str] = {
         DROP TABLE IF EXISTS user_settings; DROP TABLE IF EXISTS user_perms;
         DROP INDEX IF EXISTS idx_expenses_user_kind;
         ALTER TABLE expenses DROP COLUMN kind;
+    """,
+    5: """
+        DROP TABLE IF EXISTS business_messages; DROP TABLE IF EXISTS business_chats;
+        DROP TABLE IF EXISTS business_rules; DROP TABLE IF EXISTS business_connections;
     """,
 }
 
@@ -443,6 +505,115 @@ class Database:
                ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value""",
             (user_id, key, value),
         )
+
+    # ---------- Telegram Business ----------
+
+    async def bconn_upsert(self, connection_id: str, owner_id: int, user_chat_id: int | None, can_reply: bool,
+                           is_enabled: bool, now: str) -> None:
+        await self._write(
+            """INSERT INTO business_connections (connection_id, owner_id, user_chat_id, can_reply, is_enabled, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(connection_id) DO UPDATE SET owner_id = excluded.owner_id, user_chat_id = excluded.user_chat_id,
+                 can_reply = excluded.can_reply, is_enabled = excluded.is_enabled, updated_at = excluded.updated_at""",
+            (connection_id, owner_id, user_chat_id, int(can_reply), int(is_enabled), now),
+        )
+
+    async def bconn_get(self, connection_id: str) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM business_connections WHERE connection_id = ?", (connection_id,))
+
+    async def bconn_list(self, owner_id: int) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM business_connections WHERE owner_id = ? ORDER BY updated_at DESC", (owner_id,))
+
+    async def bconn_set_ai(self, owner_id: int, enabled: bool) -> int:
+        cur = await self._write("UPDATE business_connections SET ai_enabled = ? WHERE owner_id = ?", (int(enabled), owner_id))
+        return cur.rowcount
+
+    async def brules_get(self, owner_id: int) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM business_rules WHERE owner_id = ?", (owner_id,))
+
+    async def brules_set(self, owner_id: int, now: str, **fields: Any) -> None:
+        allowed = {"system_prompt", "business_info", "prohibitions", "tone", "owner_name", "pause_hours", "flood_per_min"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Неизвестные поля правил: {sorted(unknown)}")
+        await self._write("INSERT OR IGNORE INTO business_rules (owner_id, updated_at) VALUES (?, ?)", (owner_id, now))
+        for name, value in fields.items():
+            await self._write(f"UPDATE business_rules SET {name} = ?, updated_at = ? WHERE owner_id = ?", (value, now, owner_id))
+
+    async def bchat_touch(self, owner_id: int, chat_id: int, name: str | None, username: str | None, now: str,
+                          incoming: bool) -> dict[str, Any]:
+        await self._write(
+            """INSERT INTO business_chats (owner_id, chat_id, client_name, username, created_at, last_incoming_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(owner_id, chat_id) DO UPDATE SET
+                 client_name = COALESCE(excluded.client_name, client_name), username = COALESCE(excluded.username, username),
+                 last_incoming_at = CASE WHEN ? THEN excluded.last_incoming_at ELSE last_incoming_at END""",
+            (owner_id, chat_id, name, username, now, now if incoming else None, int(incoming)),
+        )
+        chat = await self.bchat_get(owner_id, chat_id)
+        assert chat is not None
+        return chat
+
+    async def bchat_get(self, owner_id: int, chat_id: int) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM business_chats WHERE owner_id = ? AND chat_id = ?", (owner_id, chat_id))
+
+    async def bchat_list(self, owner_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        return await self._all(
+            "SELECT * FROM business_chats WHERE owner_id = ? ORDER BY COALESCE(last_incoming_at, created_at) DESC LIMIT ?",
+            (owner_id, limit),
+        )
+
+    async def bchat_set(self, owner_id: int, chat_id: int, **fields: Any) -> bool:
+        allowed = {"excluded", "paused_until", "intro_sent", "last_owner_at"}
+        unknown = set(fields) - allowed
+        if unknown or not fields:
+            raise ValueError(f"Неизвестные поля чата: {sorted(unknown)}")
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        cur = await self._write(
+            f"UPDATE business_chats SET {sets} WHERE owner_id = ? AND chat_id = ?", (*fields.values(), owner_id, chat_id)
+        )
+        return cur.rowcount > 0
+
+    async def bmsg_add(self, owner_id: int, chat_id: int, role: str, text: str, tg_msg_id: int | None, now: str) -> int:
+        cur = await self._write(
+            "INSERT INTO business_messages (owner_id, chat_id, role, text, tg_msg_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (owner_id, chat_id, role, text, tg_msg_id, now),
+        )
+        return int(cur.lastrowid)
+
+    async def bmsg_recent(self, owner_id: int, chat_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        rows = await self._all(
+            "SELECT * FROM business_messages WHERE owner_id = ? AND chat_id = ? ORDER BY id DESC LIMIT ?",
+            (owner_id, chat_id, limit),
+        )
+        return rows[::-1]
+
+    async def bmsg_is_ours(self, owner_id: int, chat_id: int, tg_msg_id: int) -> bool:
+        row = await self._one(
+            "SELECT 1 AS x FROM business_messages WHERE owner_id = ? AND chat_id = ? AND tg_msg_id = ? AND role = 'assistant'",
+            (owner_id, chat_id, tg_msg_id),
+        )
+        return row is not None
+
+    async def bmsg_edit(self, owner_id: int, chat_id: int, tg_msg_id: int, text: str) -> bool:
+        cur = await self._write(
+            "UPDATE business_messages SET text = ? WHERE owner_id = ? AND chat_id = ? AND tg_msg_id = ? AND role != 'assistant'",
+            (text, owner_id, chat_id, tg_msg_id),
+        )
+        return cur.rowcount > 0
+
+    async def bmsg_delete(self, owner_id: int, chat_id: int, tg_msg_ids: list[int]) -> int:
+        n = 0
+        for mid in tg_msg_ids:
+            cur = await self._write(
+                "DELETE FROM business_messages WHERE owner_id = ? AND chat_id = ? AND tg_msg_id = ?", (owner_id, chat_id, mid)
+            )
+            n += cur.rowcount
+        return n
+
+    async def bmsg_cleanup(self, before: str) -> int:
+        cur = await self._write("DELETE FROM business_messages WHERE created_at < ?", (before,))
+        return cur.rowcount
 
     # ---------- задачи ----------
 

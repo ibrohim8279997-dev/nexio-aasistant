@@ -38,6 +38,8 @@ class BotScheduler:
             self.subscription_reminders, "interval", hours=1, id="sub_reminders",
             next_run_time=datetime.now(TZ) + timedelta(seconds=30), **common,
         )
+        self.scheduler.add_job(self.cleanup_business, "interval", hours=24, id="business_cleanup",
+                               next_run_time=datetime.now(TZ) + timedelta(minutes=2), **common)
         if self.system_db is not None:
             self.scheduler.add_job(self.cleanup_queue, "interval", hours=24, id="queue_cleanup", **common)
         self.scheduler.start()
@@ -109,6 +111,17 @@ class BotScheduler:
                 await self.db.mark_sub_notified(user["id"])
         except Exception:  # noqa: BLE001
             log.exception("Ошибка в задаче напоминаний о подписке")
+
+    async def cleanup_business(self) -> None:
+        """Журнал диалогов Business хранится 30 дней."""
+        try:
+            from bot.services import business
+
+            removed = await self.db.bmsg_cleanup(business.cutoff())
+            if removed:
+                log.info("Business: удалено старых сообщений: %s", removed)
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка очистки журнала Business")
 
     async def cleanup_queue(self) -> None:
         """Удалить выполненные/упавшие задания шины старше 7 дней."""

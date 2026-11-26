@@ -39,6 +39,10 @@ COMMANDS = [
     BotCommand(command="subscription", description="Подписка"),
     BotCommand(command="paysupport", description="Помощь с оплатой"),
     BotCommand(command="agents", description="Агенты (для владельца)"),
+    BotCommand(command="brules", description="Правила Business-чата"),
+    BotCommand(command="bchats", description="Чаты клиентов"),
+    BotCommand(command="pause", description="Кимо молчит в Business"),
+    BotCommand(command="resume", description="Кимо снова отвечает"),
     BotCommand(command="help", description="Помощь"),
 ]
 

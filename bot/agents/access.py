@@ -41,6 +41,14 @@ METHOD_TABLES: dict[str, frozenset[str]] = {
         # права и настройки пользователей
         "user_perm_rows": ["user_perms"], "set_user_perm": ["user_perms"],
         "get_user_setting": ["user_settings"], "user_settings": ["user_settings"], "set_user_setting": ["user_settings"],
+        # Telegram Business
+        "bconn_upsert": ["business_connections"], "bconn_get": ["business_connections"],
+        "bconn_list": ["business_connections"], "bconn_set_ai": ["business_connections"],
+        "brules_get": ["business_rules"], "brules_set": ["business_rules"],
+        "bchat_touch": ["business_chats"], "bchat_get": ["business_chats"], "bchat_list": ["business_chats"],
+        "bchat_set": ["business_chats"],
+        "bmsg_add": ["business_messages"], "bmsg_recent": ["business_messages"], "bmsg_is_ours": ["business_messages"],
+        "bmsg_edit": ["business_messages"], "bmsg_delete": ["business_messages"], "bmsg_cleanup": ["business_messages"],
         # собственная таблица ассистента
         "add_note": ["agent_assistant_notes"], "list_notes": ["agent_assistant_notes"],
         "delete_note": ["agent_assistant_notes"],
