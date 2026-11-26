@@ -20,6 +20,8 @@ class FakeBot(Bot):
     async def __call__(self, method: TelegramMethod[Any], request_timeout: int | None = None) -> Any:
         self.calls.append(method)
         name = type(method).__name__
+        if name == "GetMe":
+            return User(id=999, is_bot=True, first_name="Kimo", username="kimo_test_bot")
         if name in {"SendMessage", "EditMessageText", "SendPhoto", "SendInvoice", "SendChatAction"}:
             if name == "SendChatAction":
                 return True

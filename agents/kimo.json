@@ -23,7 +23,11 @@
     "business_rules",
     "business_chats",
     "business_messages",
-    "access_grants"
+    "access_grants",
+    "scheduled_messages",
+    "broadcast_log",
+    "broadcast_subs",
+    "broadcast_optouts"
   ],
   "allowed_commands": [
     "start",
@@ -41,7 +45,8 @@
     "resume",
     "brules",
     "bchats",
-    "grants"
+    "grants",
+    "bcast"
   ],
   "deny_rules": [
     "Не раскрывать токены, ключи и содержимое .env",

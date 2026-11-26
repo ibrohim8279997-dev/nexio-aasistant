@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from html import escape
 
-from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.db import Database
 from bot.handlers.common import show
+from bot.timeutil import now_utc, to_db
 from bot.keyboards import Menu, main_menu
 
 router = Router(name="start")
@@ -27,6 +30,25 @@ HELP_TEXT = (
     "/subscription — подписка, /paysupport — помощь с оплатой\n"
     "/cancel — отменить ввод"
 )
+
+
+@router.message(CommandStart(deep_link=True, magic=F.args.regexp(r"^sb_(\d+)$")), flags={"public": True})
+async def cmd_start_subscribe(message: Message, command: CommandObject, db: Database, bot: Bot, state: FSMContext) -> None:
+    """Ссылка владельца t.me/<бот>?start=sb_<id>: человек сам подписывается на сообщения от Кимо."""
+    await state.clear()
+    owner = await db.get_user_by_tg(int(command.args[3:]))
+    if owner is None or message.from_user is None or message.from_user.is_bot or message.chat.type != "private":
+        await message.answer("Ссылка недействительна.")
+        return
+    await db.bsub_add(owner["id"], message.chat.id, message.from_user.full_name, to_db(now_utc()))
+    who = owner.get("first_name") or "владельца"
+    await message.answer(f"Готово! Я Кимо, AI-агент {escape(who)}. Теперь я могу писать вам сообщения от имени бота. "
+                         "Чтобы отписаться, напишите «стоп».")
+    try:
+        await bot.send_message(owner["tg_id"], f"🔔 Новый подписчик на рассылки: {message.from_user.full_name} (ID {message.chat.id}). "
+                               f"Создать рассылку: /bcast add {message.chat.id} 10:00 daily ai спроси, как дела", parse_mode=None)
+    except TelegramAPIError:
+        pass
 
 
 @router.message(CommandStart(), flags={"public": True})

@@ -25,6 +25,7 @@ from bot.handlers import get_routers
 from bot.voice.tg import synthesizer_from_env
 from bot.middlewares import AccessMiddleware, GroupGuardMiddleware, ThrottlingMiddleware, UserMiddleware
 from bot.services.rates import RatesService
+from bot.services.broadcast import Broadcaster
 from bot.services.scheduler import BotScheduler
 
 log = logging.getLogger("bot")
@@ -41,6 +42,7 @@ COMMANDS = [
     BotCommand(command="agents", description="Агенты (для владельца)"),
     BotCommand(command="brules", description="Правила Business-чата"),
     BotCommand(command="bchats", description="Чаты клиентов"),
+    BotCommand(command="bcast", description="Рассылки по расписанию"),
     BotCommand(command="pause", description="Кимо молчит в Business"),
     BotCommand(command="resume", description="Кимо снова отвечает"),
     BotCommand(command="help", description="Помощь"),
@@ -122,6 +124,9 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
     watchdog_task: asyncio.Task[None] | None = None
     try:
         scheduler.start()
+        broadcaster = Broadcaster(bot, scoped, settings, llm)
+        scheduler.scheduler.add_job(broadcaster.tick, "interval", seconds=60, id="broadcasts", max_instances=1,
+                                    coalesce=True, misfire_grace_time=120)
         try:
             await bot.set_my_commands(COMMANDS)
         except Exception as exc:  # noqa: BLE001

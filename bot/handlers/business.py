@@ -8,8 +8,9 @@ from datetime import timedelta
 from html import escape
 from typing import Any
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BusinessConnection, BusinessMessagesDeleted, Message
 
@@ -18,6 +19,7 @@ from bot.ai.queue import P_CLIENT, UserLimiter
 from bot.config import Settings
 from bot.db import Database
 from bot.middlewares import PermMiddleware
+from bot.services import broadcast as bcast
 from bot.services import business as biz
 from bot.services import perms as perms_svc
 from bot.services import grants as grants_svc
@@ -142,6 +144,18 @@ async def on_business_message(message: Message, bot: Bot, db: Database, settings
     if not text:
         return
     await db.bmsg_add(owner["id"], chat_id, "client", text[:biz.MAX_CLIENT_TEXT], message.message_id, now)
+
+    if biz.is_stop(text):  # «стоп» / «не пиши»: рассылки этому человеку отключаются навсегда
+        stopped = await db.sched_disable_chat(owner["id"], chat_id)
+        await db.optout_add(owner["id"], chat_id, now)
+        if stopped and conn["can_reply"] and conn["is_enabled"]:
+            try:
+                ack = "Хорошо, больше не буду писать." if biz.guess_lang(text) == "ru" else "Xo'p, endi yozmayman."
+                sent = await bot.send_message(chat_id, ack, business_connection_id=conn["connection_id"], parse_mode=None)
+                await db.bmsg_add(owner["id"], chat_id, "assistant", ack, sent.message_id, to_db(now_utc()))
+            except TelegramAPIError as exc:
+                log.warning("Business: не удалось подтвердить «стоп»: %s", type(exc).__name__)
+        return
 
     rules = await db.brules_get(owner["id"])
     if not await owner_allowed(db, owner, settings) or not biz.decide(conn, chat, rules).reply:
@@ -322,3 +336,97 @@ async def cmd_bchats(message: Message, db: Database, db_user: dict[str, Any]) ->
         lines.append(f"{state} <code>{c['chat_id']}</code> {who}")
     lines.append("\n/pause &lt;chat_id&gt; — молчать в чате, /resume &lt;chat_id&gt; — вернуть")
     await message.answer("\n".join(lines))
+
+
+# ---------- «стоп» от подписчика бота и рассылки (команды владельца) ----------
+
+@router.message(F.text, F.chat.type == "private", flags={"public": True, "noperm": True})
+async def on_subscriber_stop(message: Message, db: Database) -> None:
+    """Подписчик, который написал боту «стоп», отписывается от рассылок. Остальным сообщениям не мешаем."""
+    if not biz.is_stop(message.text or ""):
+        raise SkipHandler
+    owners = await db.bsub_owners_of(message.chat.id)
+    if not owners:
+        raise SkipHandler
+    for sub_row in owners:
+        await db.bsub_remove(sub_row["owner_id"], sub_row["chat_id"])
+        await db.sched_disable_chat(sub_row["owner_id"], sub_row["chat_id"])
+        await db.optout_add(sub_row["owner_id"], sub_row["chat_id"], to_db(now_utc()))
+    await message.answer("Хорошо, больше не буду писать. Подписаться снова можно по ссылке владельца.")
+
+
+BCAST_HELP = (
+    "<b>Рассылки</b>\n"
+    "/bcast — список\n"
+    "/bcast add &lt;chat_id&gt; &lt;ЧЧ:ММ&gt; &lt;дни&gt; text &lt;текст&gt; — фиксированный текст\n"
+    "/bcast add &lt;chat_id&gt; &lt;ЧЧ:ММ&gt; &lt;дни&gt; ai &lt;тема&gt; — ИИ по теме («спроси, как дела»)\n"
+    "Дни: daily, weekdays, weekend, 1-5, пн,ср,пт\n"
+    "/bcast on|off|del &lt;id&gt;, /bcast log, /bcast chats — кому можно писать, /bcast link — ссылка для подписки"
+)
+
+
+def sched_line(s: dict[str, Any]) -> str:
+    what = f"текст: {s['text'][:40]}" if s["mode"] == "text" else f"ИИ: {s['topic'][:40]}"
+    state = "✅" if s["active"] else "⏸"
+    return (f"{state} <b>#{s['id']}</b> чат <code>{s['chat_id']}</code> {s['send_time']} дни {s['weekdays']} "
+            f"({'бот' if s['channel'] == 'bot' else 'Business'}) — {escape(what)}\n    последний: {escape(s['last_status'] or '—')}")
+
+
+@router.message(Command("bcast"), flags={"perm": "broadcasts"})
+async def cmd_bcast(message: Message, command: CommandObject, bot: Bot, db: Database, db_user: dict[str, Any]) -> None:
+    args = (command.args or "").split(maxsplit=5)
+    uid = db_user["id"]
+    if not args:
+        rows = await db.sched_list(uid)
+        await message.answer("\n".join(["<b>Рассылки</b>"] + [sched_line(s) for s in rows]) if rows
+                             else "Рассылок нет.\n\n" + BCAST_HELP)
+        return
+    action = args[0].lower()
+    if action == "add":
+        if len(args) < 6 or not args[1].lstrip("-").isdigit():
+            await message.answer(BCAST_HELP)
+            return
+        mode, payload = args[4].lower(), args[5]
+        try:
+            sid = await bcast.create_schedule(
+                db, db_user, int(args[1]), args[2], bcast.parse_days(args[3]), mode,
+                payload if mode == "text" else "", payload if mode == "ai" else "",
+            )
+        except bcast.BroadcastError as exc:
+            await message.answer(f"⚠️ {escape(str(exc))}")
+            return
+        known = {c["chat_id"] for c in await bcast.known_chats(db, uid)}
+        note = "" if int(args[1]) in known else (
+            "\n⚠️ Кимо ещё не видел сообщений от этого чата: пока человек не напишет вам (или не подпишется по /bcast link), "
+            "рассылка будет пропускаться.")
+        await message.answer(f"✅ Рассылка #{sid} создана.{note}")
+        return
+    if action in ("on", "off", "del") and len(args) == 2 and args[1].isdigit():
+        sid = int(args[1])
+        if action == "del":
+            ok = await db.sched_delete(uid, sid)
+        else:
+            sch = await db.sched_get(uid, sid)
+            if sch is not None and action == "on" and await db.optout_has(uid, sch["chat_id"]):
+                await message.answer("⚠️ Этот человек написал «стоп», включить нельзя.")
+                return
+            ok = await db.sched_update(uid, sid, active=int(action == "on"))
+        await message.answer("Готово." if ok else "Не нашёл такую рассылку.")
+        return
+    if action == "log":
+        rows = await db.blog_list(uid, 15)
+        lines = [f"{r['ts'][5:16]} #{r['schedule_id']} чат {r['chat_id']}: {escape(r['status'])} {escape(r['detail'][:60])}" for r in rows]
+        await message.answer("<b>История отправок</b>\n" + "\n".join(lines) if lines else "История пуста.")
+        return
+    if action == "chats":
+        chats = await bcast.known_chats(db, uid)
+        lines = [f"<code>{c['chat_id']}</code> {escape(c['name'] or '—')} ({'бот' if c['channel'] == 'bot' else 'Business'})" for c in chats]
+        await message.answer("<b>Кому можно писать</b>\n" + "\n".join(lines) if lines else "Пока никого: нужны клиенты, которые писали вам, или подписчики.")
+        return
+    if action == "link":
+        me = await bot.get_me()
+        await message.answer(
+            f"Ссылка для подписки (человек сам нажимает «Запустить»):\nhttps://t.me/{me.username}?start=sb_{db_user['tg_id']}\n"
+            "Подписанным людям Кимо пишет от имени бота, без 24-часового окна Business. Отписка — слово «стоп».")
+        return
+    await message.answer(BCAST_HELP)

@@ -306,6 +306,60 @@ MIGRATIONS: list[str] = [
             SELECT value FROM json_each(agents.allowed_tables) UNION SELECT 'access_grants')
     ) WHERE name = 'kimo' AND json_valid(allowed_tables);
     """,
+    # 7: рассылки по расписанию, журнал отправок, подписчики через бота, отказы («стоп»)
+    """
+    CREATE TABLE IF NOT EXISTS scheduled_messages (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        chat_id       INTEGER NOT NULL,
+        send_time     TEXT NOT NULL,
+        weekdays      TEXT NOT NULL DEFAULT '1234567',
+        tz            TEXT NOT NULL DEFAULT 'Asia/Tashkent',
+        mode          TEXT NOT NULL DEFAULT 'text' CHECK (mode IN ('text', 'ai')),
+        text          TEXT NOT NULL DEFAULT '',
+        topic         TEXT NOT NULL DEFAULT '',
+        channel       TEXT NOT NULL DEFAULT 'business' CHECK (channel IN ('business', 'bot')),
+        active        INTEGER NOT NULL DEFAULT 1,
+        last_run      TEXT,
+        last_run_date TEXT,
+        last_status   TEXT,
+        created_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sched_owner ON scheduled_messages(owner_id, active);
+
+    CREATE TABLE IF NOT EXISTS broadcast_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule_id INTEGER,
+        owner_id    INTEGER NOT NULL,
+        chat_id     INTEGER NOT NULL,
+        ts          TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        detail      TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_blog_chat ON broadcast_log(owner_id, chat_id, ts);
+
+    CREATE TABLE IF NOT EXISTS broadcast_subs (
+        owner_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        chat_id    INTEGER NOT NULL,
+        name       TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, chat_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS broadcast_optouts (
+        owner_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        chat_id    INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, chat_id)
+    );
+
+    UPDATE agents SET allowed_tables = (
+        SELECT json_group_array(value) FROM (
+            SELECT value FROM json_each(agents.allowed_tables)
+            UNION SELECT 'scheduled_messages' UNION SELECT 'broadcast_log'
+            UNION SELECT 'broadcast_subs' UNION SELECT 'broadcast_optouts')
+    ) WHERE name = 'kimo' AND json_valid(allowed_tables);
+    """,
 ]
 
 # Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
@@ -325,6 +379,10 @@ DOWN_MIGRATIONS: dict[int, str] = {
         DROP TABLE IF EXISTS user_settings; DROP TABLE IF EXISTS user_perms;
         DROP INDEX IF EXISTS idx_expenses_user_kind;
         ALTER TABLE expenses DROP COLUMN kind;
+    """,
+    7: """
+        DROP TABLE IF EXISTS broadcast_optouts; DROP TABLE IF EXISTS broadcast_subs;
+        DROP TABLE IF EXISTS broadcast_log; DROP TABLE IF EXISTS scheduled_messages;
     """,
     6: "DROP TABLE IF EXISTS access_grants;",
     5: """
@@ -690,6 +748,97 @@ class Database:
 
     async def grant_mark_notified(self, grant_id: int) -> None:
         await self._write("UPDATE access_grants SET notified_1d = 1 WHERE id = ?", (grant_id,))
+
+    # ---------- рассылки ----------
+
+    async def sched_create(self, owner_id: int, chat_id: int, send_time: str, weekdays: str, tz: str, mode: str,
+                           text: str, topic: str, channel: str, now: str) -> int:
+        cur = await self._write(
+            """INSERT INTO scheduled_messages (owner_id, chat_id, send_time, weekdays, tz, mode, text, topic, channel, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_id, chat_id, send_time, weekdays, tz, mode, text, topic, channel, now),
+        )
+        return int(cur.lastrowid)
+
+    async def sched_get(self, owner_id: int, sched_id: int) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM scheduled_messages WHERE id = ? AND owner_id = ?", (sched_id, owner_id))
+
+    async def sched_list(self, owner_id: int) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM scheduled_messages WHERE owner_id = ? ORDER BY id", (owner_id,))
+
+    async def sched_all_active(self) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM scheduled_messages WHERE active = 1 ORDER BY id")
+
+    async def sched_update(self, owner_id: int, sched_id: int, **fields: Any) -> bool:
+        allowed = {"chat_id", "send_time", "weekdays", "tz", "mode", "text", "topic", "channel", "active",
+                   "last_run", "last_run_date", "last_status"}
+        unknown = set(fields) - allowed
+        if unknown or not fields:
+            raise ValueError(f"Неизвестные поля рассылки: {sorted(unknown)}")
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        cur = await self._write(
+            f"UPDATE scheduled_messages SET {sets} WHERE id = ? AND owner_id = ?", (*fields.values(), sched_id, owner_id)
+        )
+        return cur.rowcount > 0
+
+    async def sched_delete(self, owner_id: int, sched_id: int) -> bool:
+        cur = await self._write("DELETE FROM scheduled_messages WHERE id = ? AND owner_id = ?", (sched_id, owner_id))
+        return cur.rowcount > 0
+
+    async def sched_disable_chat(self, owner_id: int, chat_id: int) -> int:
+        cur = await self._write(
+            "UPDATE scheduled_messages SET active = 0, last_status = 'stopped: клиент написал «стоп»' "
+            "WHERE owner_id = ? AND chat_id = ? AND active = 1",
+            (owner_id, chat_id),
+        )
+        return cur.rowcount
+
+    async def blog_add(self, schedule_id: int | None, owner_id: int, chat_id: int, status: str, detail: str, now: str) -> int:
+        cur = await self._write(
+            "INSERT INTO broadcast_log (schedule_id, owner_id, chat_id, ts, status, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (schedule_id, owner_id, chat_id, now, status, detail[:300]),
+        )
+        return int(cur.lastrowid)
+
+    async def blog_list(self, owner_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM broadcast_log WHERE owner_id = ? ORDER BY id DESC LIMIT ?", (owner_id, limit))
+
+    async def blog_sent_since(self, owner_id: int, chat_id: int, since: str) -> int:
+        row = await self._one(
+            "SELECT COUNT(*) AS n FROM broadcast_log WHERE owner_id = ? AND chat_id = ? AND status = 'sent' AND ts >= ?",
+            (owner_id, chat_id, since),
+        )
+        return int(row["n"]) if row else 0
+
+    async def bsub_add(self, owner_id: int, chat_id: int, name: str | None, now: str) -> None:
+        await self._write("INSERT OR IGNORE INTO broadcast_subs (owner_id, chat_id, name, created_at) VALUES (?, ?, ?, ?)",
+                          (owner_id, chat_id, name, now))
+        await self._write("DELETE FROM broadcast_optouts WHERE owner_id = ? AND chat_id = ?", (owner_id, chat_id))
+
+    async def bsub_get(self, owner_id: int, chat_id: int) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM broadcast_subs WHERE owner_id = ? AND chat_id = ?", (owner_id, chat_id))
+
+    async def bsub_list(self, owner_id: int) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM broadcast_subs WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,))
+
+    async def bsub_owners_of(self, chat_id: int) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM broadcast_subs WHERE chat_id = ?", (chat_id,))
+
+    async def bsub_remove(self, owner_id: int, chat_id: int) -> bool:
+        cur = await self._write("DELETE FROM broadcast_subs WHERE owner_id = ? AND chat_id = ?", (owner_id, chat_id))
+        return cur.rowcount > 0
+
+    async def optout_add(self, owner_id: int, chat_id: int, now: str) -> None:
+        await self._write("INSERT OR IGNORE INTO broadcast_optouts (owner_id, chat_id, created_at) VALUES (?, ?, ?)",
+                          (owner_id, chat_id, now))
+
+    async def optout_has(self, owner_id: int, chat_id: int) -> bool:
+        return await self._one("SELECT 1 AS x FROM broadcast_optouts WHERE owner_id = ? AND chat_id = ?",
+                               (owner_id, chat_id)) is not None
+
+    async def optout_remove(self, owner_id: int, chat_id: int) -> bool:
+        cur = await self._write("DELETE FROM broadcast_optouts WHERE owner_id = ? AND chat_id = ?", (owner_id, chat_id))
+        return cur.rowcount > 0
 
     # ---------- задачи ----------
 

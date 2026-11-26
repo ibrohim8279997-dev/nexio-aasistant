@@ -132,6 +132,8 @@ class PermMiddleware(BaseMiddleware):
         self.default = default
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        if get_flag(data, "noperm"):
+            return await handler(event, data)
         perm = get_flag(data, "perm") or self.default
         db_user = data.get("db_user")
         if not perm or db_user is None:
