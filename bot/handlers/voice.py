@@ -78,6 +78,7 @@ async def make_deps(
 ) -> assistant.AssistantDeps:
     return assistant.AssistantDeps(
         perms=await perms_svc.effective_perms(db, db_user, settings.admin_id),
+        miniapp_url=settings.miniapp_url,
         db=db,
         user=db_user,
         rates=rates,

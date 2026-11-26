@@ -591,7 +591,11 @@
       if (e.code === 'no_access') { gate(t('no_access'), e.message, h('div', { class: 'sub', text: t('no_access_hint') })); return; }
       gate(t('err_generic'), e.message, h('button', { class: 'btn', onclick: () => location.reload(), text: t('retry') })); return;
     }
-    window.I18N.setLang(lang()); applyTheme(); render();
+    window.I18N.setLang(lang()); applyTheme();
+    const want = new URLSearchParams(location.search).get('s');   // «открой аналитику» из чата: /?s=stats
+    if (want && ['tasks', 'stats', 'business'].includes(want)) S.tab = want;
+    else if (want && SCREENS[want] && want !== 'home') S.stack = [want];
+    render();
   }
   window.__kimo = { S, render, api };
   document.addEventListener('DOMContentLoaded', boot);

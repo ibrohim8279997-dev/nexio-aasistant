@@ -15,7 +15,8 @@ from aiogram.exceptions import TelegramAPIError
 from bot.agents.bus import BusError, NeedsClarification, chunks, plain_text
 from bot.agents.health import effective_status
 from bot.agents.context import AgentContext
-from bot.ai.actions import ActionParseError, AddExpense, Clarify, ShowStats, build_messages, parse_actions
+from bot.ai.actions import (ActionParseError, AddExpense, Clarify, CreateBroadcast, PauseBusiness, ShowStats, build_messages,
+                            parse_actions)
 from bot.ai.llm import LLMClient
 from bot.config import Settings
 from bot.ai.groq_client import GroqError
@@ -50,7 +51,8 @@ def context_note(payload: dict[str, Any]) -> str:
 
 def is_private_action(action: Any) -> bool:
     """Действия, которые не выполняются по запросу других агентов."""
-    return isinstance(action, AddExpense) or (isinstance(action, ShowStats) and action.topic == "expenses")
+    return isinstance(action, (AddExpense, CreateBroadcast, PauseBusiness)) or (
+        isinstance(action, ShowStats) and action.topic == "expenses")
 
 
 VOICE_SERVICE = "voice_sip"
@@ -87,7 +89,7 @@ class KimoBusHandler:
         history = [(str(h.get("user", "")), str(h.get("kimo", ""))) for h in (payload.get("context") or {}).get("history", [])][-3:]
         deps = assistant.AssistantDeps(
             db=self.db, user=owner, rates=self.rates, identity=await self.ctx.identity() + "\n" + VOICE_NOTE,
-            ctx=self.ctx, chat_id=self.settings.admin_id, is_group=False, is_owner=True,
+            ctx=self.ctx, chat_id=self.settings.admin_id, is_group=False, is_owner=True, miniapp_url=self.settings.miniapp_url,
             offer_restart=self.ctx.admin.offer_restart if self.ctx.admin else None, admin=self.ctx.admin,
         )
         try:
@@ -123,7 +125,7 @@ class KimoBusHandler:
         perms = await perms_svc.effective_perms(self.db, user, self.settings.admin_id)
         deps = assistant.AssistantDeps(
             db=self.db, user=user, rates=self.rates, identity=await self.ctx.identity(), ctx=self.ctx,
-            chat_id=user["tg_id"], is_group=False, is_owner=is_owner, perms=perms,
+            chat_id=user["tg_id"], is_group=False, is_owner=is_owner, perms=perms, miniapp_url=self.settings.miniapp_url,
             offer_restart=self.ctx.admin.offer_restart if self.ctx.admin else None, admin=self.ctx.admin,
         )
         if payload.get("action") is not None:  # типизированное действие без обращения к ИИ (управление агентами)

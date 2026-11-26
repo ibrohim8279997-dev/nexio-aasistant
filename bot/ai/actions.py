@@ -163,10 +163,44 @@ class CreateAgent(_Base):
     description: str = Field(min_length=10, max_length=3000)
 
 
+APP_SECTIONS = ("home", "tasks", "stats", "reminders", "advice", "business", "broadcasts", "agents", "access", "settings")
+
+
+class CreateBroadcast(_Base):
+    """Рассылка по расписанию: чат — ID или имя клиента из списка чатов."""
+
+    type: Literal["create_broadcast"]
+    chat: str = Field(min_length=1, max_length=100)
+    time: str = Field(pattern=r"^\d{1,2}:\d{2}$")
+    days: str = Field(default="daily", max_length=40)
+    mode: Literal["text", "ai"] = "ai"
+    text: str = Field(default="", max_length=1000)
+    topic: str = Field(default="", max_length=300)
+
+
+class PauseBusiness(_Base):
+    """Выключить или включить ответы Кимо клиентам Business: везде или в одном чате."""
+
+    type: Literal["pause_business"]
+    enabled: bool = False
+    chat: str | None = Field(default=None, max_length=100)
+
+
+class OpenApp(_Base):
+    type: Literal["open_app"]
+    section: str = "home"
+
+    @field_validator("section", mode="before")
+    @classmethod
+    def _section(cls, v: Any) -> Any:
+        v = str(v or "home").strip().lower()
+        return v if v in APP_SECTIONS else "home"
+
+
 Action = Annotated[
     Union[
         AddTask, AddExpense, CompleteTask, ListTasks, ShowStats, Reply, ListReminders, Delegate, Clarify, CreateAgent,
-        ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData, DiagnoseAgent,
+        ManageAgent, AgentsReport, AgentLogs, AgentTables, AgentData, DiagnoseAgent, CreateBroadcast, PauseBusiness, OpenApp,
     ],
     Field(discriminator="type"),
 ]
@@ -257,6 +291,9 @@ SYSTEM_PROMPT = """{identity}
 11a. {{"type":"agents_report"}} — «кто работает», статусы и проблемы агентов
 11b. {{"type":"agent_logs","agent":"<имя>","minutes":<N или null>}} — логи агента; 11c. {{"type":"agent_tables","agent":"<имя>"|null}} — структура таблиц; 11d. {{"type":"agent_data","agent":"<имя>","table":"<таблица>","limit":10}}
 11e. {{"type":"diagnose_agent","agent":"<имя>"}} — найти причину сбоя агента и подготовить исправление (применится только после «да»)
+12. {{"type":"create_broadcast","chat":"<ID или имя клиента из списка чатов>","time":"HH:MM","days":"daily|weekdays|weekend|1-5|пн,ср,пт","mode":"text"|"ai","text":"<текст>","topic":"<тема для ИИ, например «спроси, как дела»>"}} — рассылка по расписанию
+13. {{"type":"pause_business","enabled":true|false,"chat":"<имя или ID клиента>"|null}} — выключить (false) или включить (true) ответы Кимо клиентам Business: во всех чатах (chat=null) или в одном
+14. {{"type":"open_app","section":"home|tasks|stats|reminders|advice|business|broadcasts|agents|access|settings"}} — открыть раздел Mini App
 11. {{"type":"manage_agent","agent":"<имя или системное имя>","op":"start|stop|restart|rename|set_role|set_prompt|set_models|grant_tables|revoke_tables|grant_commands|revoke_commands","value":<строка или список, если нужно>}} — управление агентом; владелец подтвердит в личке
 
 Правила:
@@ -273,7 +310,13 @@ SYSTEM_PROMPT = """{identity}
 - Ты диспетчер. Расходы, задачи и напоминания делаешь сам. Остальное передавай агенту, чья роль подходит
   (delegate, только агентам из списка «Другие агенты»). Вопросы, поиск информации, тексты — универсальному помощнику.
 - Просят создать нового агента — create_agent с описанием словами владельца, ничего не добавляй.
+- Расход и доход различай: «получил», «оплатил клиент», «продал» — доход (kind=income), «купил», «потратил» — расход.
+- «Пиши/спрашивай клиента каждый день в 10:00…» — create_broadcast, чат бери из списка «Чаты клиентов» (нет такого — clarify). «Не отвечай клиентам», «поставь на паузу бизнес-чат» — pause_business.
+- «Открой аналитику/задачи/рассылки…» — open_app с нужным разделом.
 - Неясно, чья это задача, — clarify с одним коротким вопросом. Не передавай задачу наугад.
+
+Чаты клиентов (ID: имя):
+{chats}
 
 Открытые задачи пользователя:
 {tasks}"""
@@ -283,10 +326,12 @@ DEFAULT_IDENTITY = "Ты — Кимо, личный ассистент влад�
 
 
 def build_messages(
-    user_text: str, now_text: str, open_tasks: list[str], identity: str = "", history: list[tuple[str, str]] | None = None
+    user_text: str, now_text: str, open_tasks: list[str], identity: str = "", history: list[tuple[str, str]] | None = None,
+    chats: list[str] | None = None,
 ) -> list[dict[str, str]]:
     tasks_block = "\n".join(open_tasks) if open_tasks else "(нет)"
-    system = SYSTEM_PROMPT.format(identity=identity or DEFAULT_IDENTITY, now=now_text, tasks=tasks_block)
+    chats_block = "\n".join(chats) if chats else "(нет)"
+    system = SYSTEM_PROMPT.format(identity=identity or DEFAULT_IDENTITY, now=now_text, tasks=tasks_block, chats=chats_block)
     if history:  # предыдущие реплики голосового звонка: чтобы работало «а теперь сделай это завтра»
         turns = "\n".join(f"Владелец: {u[:300]}\nТы: {k[:300]}" for u, k in history[-3:])
         system += f"\n\nПредыдущие реплики этого разговора:\n{turns}"

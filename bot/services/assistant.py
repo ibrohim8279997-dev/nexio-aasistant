@@ -18,6 +18,9 @@ from bot.ai.actions import (
     AddTask,
     Clarify,
     CompleteTask,
+    CreateBroadcast,
+    OpenApp,
+    PauseBusiness,
     CreateAgent,
     Delegate,
     DiagnoseAgent,
@@ -64,6 +67,7 @@ class AssistantDeps:
     is_owner: bool = False
     offer_restart: Any = None  # async (AgentConfig, text) -> str: предложить перезапуск с подтверждением
     admin: Any = None  # AdminActions
+    miniapp_url: str = ""  # публичный адрес Mini App для open_app
     perms: frozenset[str] | None = None  # None — без ограничений (владелец, шина); иначе действующие права пользователя
     consulted: list[str] = field(default_factory=list)  # какие агенты отвечали (для audit_log голосовых обращений)
 
@@ -84,7 +88,7 @@ NO_RIGHTS = Answer("🔒 Эта функция вам недоступна. Её
 # какое право нужно для действия
 _NEEDS: tuple[tuple[Any, str], ...] = (
     (AddTask, "tasks"), (CompleteTask, "tasks"), (ListTasks, "tasks"), (ListReminders, "reminders"),
-    (AddExpense, "finance"),
+    (AddExpense, "finance"), (CreateBroadcast, "broadcasts"), (PauseBusiness, "business"),
     (Delegate, "agents_manage"), (CreateAgent, "agents_manage"),
     (ManageAgent, "agents_manage"), (AgentsReport, "agents_manage"), (AgentLogs, "agents_manage"),
     (AgentTables, "agents_manage"), (AgentData, "agents_manage"), (DiagnoseAgent, "agents_manage"),
@@ -141,6 +145,15 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
     if isinstance(action, Reply):
         return Answer(escape(action.text))
 
+    if isinstance(action, CreateBroadcast):
+        return await _create_broadcast(action, deps)
+
+    if isinstance(action, PauseBusiness):
+        return await _pause_business(action, deps)
+
+    if isinstance(action, OpenApp):
+        return _open_app(action, deps)
+
     if isinstance(action, ListReminders):
         return Answer(await _reminders_text(db, user_id))
 
@@ -161,6 +174,65 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
 
     log.warning("Неизвестное действие: %s", type(action).__name__)
     return Answer("🤔 Не понял запрос.")
+
+
+async def _resolve_chat(db: Any, owner_id: int, ref: str) -> tuple[int | None, str | None]:
+    """ID или имя клиента -> chat_id. Второй элемент — сообщение, если чат не найден или имя неоднозначно."""
+    ref = ref.strip()
+    chats = await db.bchat_list(owner_id, 200)
+    if ref.lstrip("-").isdigit():
+        return int(ref), None
+    needle = ref.casefold().lstrip("@")
+    found = [c for c in chats if needle in (c["client_name"] or "").casefold() or needle == (c["username"] or "").casefold()]
+    if len(found) == 1:
+        return found[0]["chat_id"], None
+    if not found:
+        return None, "❓ Не нашёл такого клиента среди ваших чатов. Список: /bchats"
+    names = ", ".join(f"{c['client_name'] or c['chat_id']} ({c['chat_id']})" for c in found[:5])
+    return None, f"❓ Уточните, какой клиент: {escape(names)}"
+
+
+async def _create_broadcast(action: CreateBroadcast, deps: AssistantDeps) -> Answer:
+    from bot.services import broadcast as bcast
+
+    chat_id, problem = await _resolve_chat(deps.db, deps.user["id"], action.chat)
+    if chat_id is None:
+        return Answer(problem or "❓ Какому клиенту писать?")
+    try:
+        sid = await bcast.create_schedule(
+            deps.db, deps.user, chat_id, action.time, bcast.parse_days(action.days), action.mode,
+            action.text if action.mode == "text" else "", action.topic if action.mode == "ai" else "",
+        )
+    except bcast.BroadcastError as exc:
+        return Answer(f"⚠️ {escape(str(exc))}")
+    what = action.text if action.mode == "text" else f"ИИ: {action.topic}"
+    return Answer(f"✅ Рассылка #{sid}: чат <code>{chat_id}</code>, {bcast.parse_time(action.time)}, {escape(what[:80])}\n"
+                  "Список и изменение: /bcast или Mini App.")
+
+
+async def _pause_business(action: PauseBusiness, deps: AssistantDeps) -> Answer:
+    owner = deps.user["id"]
+    if action.chat:
+        chat_id, problem = await _resolve_chat(deps.db, owner, action.chat)
+        if chat_id is None:
+            return Answer(problem or "❓ В каком чате?")
+        extra: dict[str, Any] = {} if not action.enabled else {"paused_until": None}
+        if not await deps.db.bchat_set(owner, chat_id, excluded=int(not action.enabled), **extra):
+            return Answer("❓ Такого чата нет среди чатов клиентов: /bchats")
+        return Answer(f"{'▶️ Кимо отвечает' if action.enabled else '⏸ Кимо молчит'} в чате <code>{chat_id}</code>.")
+    if not await deps.db.bconn_set_ai(owner, action.enabled):
+        return Answer("Business ещё не подключён: Telegram → Настройки → Telegram Business → Чат-боты.")
+    return Answer("▶️ Кимо снова отвечает клиентам." if action.enabled else "⏸ Кимо молчит во всех Business-чатах. Вернуть: «включи ответы клиентам».")
+
+
+def _open_app(action: OpenApp, deps: AssistantDeps) -> Answer:
+    from aiogram.types import InlineKeyboardButton, WebAppInfo
+
+    if not deps.miniapp_url.startswith("https://"):
+        return Answer("Mini App ещё не настроен: нужен публичный HTTPS-адрес (MINIAPP_URL, см. README).")
+    url = deps.miniapp_url if action.section == "home" else f"{deps.miniapp_url}/?s={action.section}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть", web_app=WebAppInfo(url=url))]])
+    return Answer(f"Открываю раздел «{escape(action.section)}»:", kb)
 
 
 async def _reminders_text(db: Database, user_id: int) -> str:

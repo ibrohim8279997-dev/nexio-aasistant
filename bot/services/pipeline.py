@@ -17,6 +17,17 @@ class NotUnderstood(Exception):
     """Модель не вернула ни одного допустимого действия."""
 
 
+async def chats_for_prompt(deps: assistant.AssistantDeps) -> list[str]:
+    """Чаты клиентов владельца («ID: имя»), чтобы «пиши Азизу» находил нужный ID. Только если есть права на бизнес или рассылки."""
+    if deps.perms is not None and not ({"business", "broadcasts"} & deps.perms):
+        return []
+    try:
+        rows = await deps.db.bchat_list(deps.user["id"], 15)
+    except Exception:  # noqa: BLE001 — нет доступа к таблице у этого агента: просто без списка
+        return []
+    return [f"{r['chat_id']}: {(r['client_name'] or '—')[:40]}" for r in rows]
+
+
 async def interpret(text: str, groq, deps: assistant.AssistantDeps,
                     history: list[tuple[str, str]] | None = None) -> list[assistant.Answer]:
     """Фраза -> ответы. Бросает GroqError (сервис недоступен) и NotUnderstood."""
@@ -24,7 +35,8 @@ async def interpret(text: str, groq, deps: assistant.AssistantDeps,
     agents = None  # передавать задачи и управлять агентами может только владелец
     if deps.ctx is not None and deps.is_owner:
         agents = await deps.ctx.registry.aliases(exclude=deps.ctx.agent.name)
-    raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks, deps.identity, history))
+    chats = await chats_for_prompt(deps)
+    raw = await groq.chat_json(build_messages(text, context_now_text(), open_tasks, deps.identity, history, chats))
     try:
         actions = parse_actions(raw, now_local().date(), agents)
     except ActionParseError as exc:
