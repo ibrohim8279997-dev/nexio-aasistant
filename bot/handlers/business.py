@@ -255,15 +255,11 @@ async def on_deleted(event: BusinessMessagesDeleted, db: Database) -> None:
 
 # ---------- команды владельца в личке ----------
 
-RULE_FIELDS = {
-    "prompt": "system_prompt", "info": "business_info", "ban": "prohibitions", "tone": "tone", "name": "owner_name",
-    "pause": "pause_hours", "flood": "flood_per_min",
-}
+RULE_FIELDS = biz.RULE_FIELDS
 RULE_TITLES = {
     "prompt": "Правила", "info": "О бизнесе", "ban": "Запреты", "tone": "Тон", "name": "Имя владельца",
     "pause": "Пауза после ручного ответа, ч", "flood": "Ответов на чат в минуту",
 }
-MAX_RULE_LEN = 3000
 
 
 def rules_text(rules: dict[str, Any] | None, owner: dict[str, Any]) -> str:
@@ -285,20 +281,11 @@ async def cmd_brules(message: Message, command: CommandObject, db: Database, db_
     args = (command.args or "").strip()
     if args:
         key, _, value = args.partition(" ")
-        key, value = key.lower(), value.strip()
-        field = RULE_FIELDS.get(key)
-        if field is None or (not value and key not in ("prompt", "info", "ban", "tone", "name")):
-            await message.answer("Формат: /brules <поле> <текст>. Поля: " + ", ".join(RULE_FIELDS))
+        try:
+            field, stored = biz.clean_rule(key.lower(), value.strip())
+        except biz.RuleError as exc:
+            await message.answer(f"⚠️ {escape(str(exc))}")
             return
-        if len(value) > MAX_RULE_LEN:
-            await message.answer(f"Слишком длинно (максимум {MAX_RULE_LEN} символов).")
-            return
-        stored: Any = value
-        if key in ("pause", "flood"):
-            if not value.isdigit() or not (0 <= int(value) <= (168 if key == "pause" else 30)):
-                await message.answer("Нужно число: пауза 0–168 часов, ответов в минуту 0–30.")
-                return
-            stored = int(value)
         await db.brules_set(db_user["id"], to_db(now_utc()), **{field: stored})
         await message.answer("✅ Сохранено.")
     await message.answer(rules_text(await db.brules_get(db_user["id"]), db_user))

@@ -15,11 +15,12 @@ from aiogram.exceptions import TelegramAPIError
 from bot.agents.bus import BusError, NeedsClarification, chunks, plain_text
 from bot.agents.health import effective_status
 from bot.agents.context import AgentContext
-from bot.ai.actions import AddExpense, Clarify, ShowStats, build_messages, parse_actions
+from bot.ai.actions import ActionParseError, AddExpense, Clarify, ShowStats, build_messages, parse_actions
 from bot.ai.llm import LLMClient
 from bot.config import Settings
 from bot.ai.groq_client import GroqError
-from bot.services import assistant, pipeline
+from bot.services import assistant, grants, pipeline
+from bot.services import perms as perms_svc
 from bot.services.rates import RatesService
 from bot.services.tasks import open_tasks_for_prompt
 from bot.logging_setup import redact_text
@@ -53,6 +54,7 @@ def is_private_action(action: Any) -> bool:
 
 
 VOICE_SERVICE = "voice_sip"
+MINIAPP = "miniapp"
 VOICE_NOTE = (
     "Владелец говорит с тобой по телефону: отвечай очень коротко (одно-два предложения), без таблиц, ссылок и логов. "
     "Опасные действия требуют подтверждения «да» ТОЛЬКО текстом в Telegram, голосовое «да» ничего не подтверждает: "
@@ -98,6 +100,92 @@ class KimoBusHandler:
         answered_by = ["kimo", *dict.fromkeys(deps.consulted)]
         return json.dumps({"text": plain_text("\n\n".join(a.text for a in answers)), "answered_by": answered_by},
                           ensure_ascii=False)
+
+    async def _miniapp_user(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Пользователь из задания Mini App: должен существовать и иметь активный доступ."""
+        payload = task["payload"]
+        if task["from_agent"] != MINIAPP or payload.get("source") != "miniapp":
+            raise BusError("Это задание принимается только от Mini App")
+        try:
+            tg_id = int(payload["tg_id"])
+        except (KeyError, TypeError, ValueError):
+            raise BusError("Нет пользователя") from None
+        user = await self.db.get_user_by_tg(tg_id)
+        if user is None or not await grants.has_access(self.db, user, self.settings):
+            raise BusError("Нет доступа")
+        return user
+
+    async def user_command(self, task: dict[str, Any]) -> str:
+        """Фраза или типизированное действие из Mini App. Права и подтверждения те же, что в Telegram."""
+        payload = task["payload"]
+        user = await self._miniapp_user(task)
+        is_owner = user["tg_id"] == self.settings.admin_id
+        perms = await perms_svc.effective_perms(self.db, user, self.settings.admin_id)
+        deps = assistant.AssistantDeps(
+            db=self.db, user=user, rates=self.rates, identity=await self.ctx.identity(), ctx=self.ctx,
+            chat_id=user["tg_id"], is_group=False, is_owner=is_owner, perms=perms,
+            offer_restart=self.ctx.admin.offer_restart if self.ctx.admin else None, admin=self.ctx.admin,
+        )
+        if payload.get("action") is not None:  # типизированное действие без обращения к ИИ (управление агентами)
+            if not is_owner:
+                raise BusError("Только для владельца")
+            agents = await self.ctx.registry.aliases(exclude=self.ctx.agent.name)
+            try:
+                actions = parse_actions(json.dumps({"actions": [payload["action"]]}), now_local().date(), agents)
+            except ActionParseError as exc:
+                raise BusError("Некорректное действие") from exc
+            answers = await assistant.execute(actions, deps)
+            for a in answers:  # карточки и подтверждения с кнопками приходят владельцу в Telegram
+                if a.markup is not None and self.bot is not None:
+                    await self.bot.send_message(user["tg_id"], a.text, reply_markup=a.markup)
+            note = "\n\n".join(a.text for a in answers)
+            if any(a.markup is not None for a in answers):
+                note += "\n\n📨 Подтвердите в Telegram."
+            return json.dumps({"text": plain_text(note)}, ensure_ascii=False)
+        text = str(payload.get("text", "")).strip()[:1000]
+        if not text:
+            raise BusError("Пустой запрос")
+        from bot.ai.queue import P_CLIENT, P_OWNER
+
+        llm = self.llm.bound(P_OWNER) if is_owner and hasattr(self.llm, "bound") else (
+            self.llm.bound(P_CLIENT, owner=user["id"]) if hasattr(self.llm, "bound") else self.llm)
+        try:
+            answers = await pipeline.interpret(text, llm, deps)
+        except GroqError as exc:
+            raise BusError(plain_text(exc.user_message)) from exc
+        except pipeline.NotUnderstood as exc:
+            raise BusError("Не понял запрос. Попробуйте иначе.") from exc
+        for a in answers:
+            if a.markup is not None and is_owner and self.bot is not None:
+                await self.bot.send_message(user["tg_id"], a.text, reply_markup=a.markup)
+        return json.dumps({"text": plain_text("\n\n".join(a.text for a in answers))}, ensure_ascii=False)
+
+    async def advice(self, task: dict[str, Any]) -> str:
+        """Рекомендации по сводке пользователя: один фоновый запрос раз в сутки (кэш держит Mini App)."""
+        await self._miniapp_user(task)
+        payload = task["payload"]
+        lang = "uz" if payload.get("lang") == "uz" else "ru"
+        stats = json.dumps(payload.get("stats") or {}, ensure_ascii=False)[:3000]
+        system = (
+            "Ты — финансовый и продуктивный помощник. По сводке за 30 дней дай 3–5 коротких практичных советов "
+            f"на языке: {'узбекский (латиница)' if lang == 'uz' else 'русский'}. Только по данным сводки, без выдумок. "
+            'Ответ — ТОЛЬКО JSON: {"tips":[{"area":"expenses"|"income"|"tasks","text":"<совет до 160 символов>"}]}'
+        )
+        from bot.ai.queue import P_BACKGROUND
+
+        llm = self.llm.bound(P_BACKGROUND) if hasattr(self.llm, "bound") else self.llm
+        try:
+            raw = await llm.chat_json([{"role": "system", "content": system}, {"role": "user", "content": stats}], max_tokens=600)
+        except GroqError as exc:
+            raise BusError(plain_text(exc.user_message)) from exc
+        try:
+            tips = [{"area": str(t.get("area", "tasks")), "text": str(t.get("text", ""))[:200]}
+                    for t in json.loads(raw).get("tips", []) if str(t.get("text", "")).strip()][:6]
+        except (ValueError, AttributeError):
+            raise BusError("ИИ вернул непонятный ответ") from None
+        if not tips:
+            raise BusError("Нет советов")
+        return json.dumps({"tips": tips}, ensure_ascii=False)
 
     async def _tell_owner(self, text: str) -> None:
         if self.bot is None:
@@ -176,6 +264,10 @@ class KimoBusHandler:
             return "pong"
         if kind == "voice_command":
             return await self.voice_command(task)
+        if kind == "user_command":
+            return await self.user_command(task)
+        if kind == "advice":
+            return await self.advice(task)
         if kind == "tg_message":
             return await self.tg_message(task)
         if kind == "call_owner":

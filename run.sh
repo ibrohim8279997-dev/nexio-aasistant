@@ -28,6 +28,7 @@ activate() {
 cmd_for() {
   case "$1" in
     voice_sip) VENV="${VOICE_VENV:-$HOME/sipenv}"; CMD=(python voice_sip.py) ;;
+    api) CMD=(python run_api.py) ;;
     *) CMD=(python run_agent.py "$1") ;;
   esac
 }

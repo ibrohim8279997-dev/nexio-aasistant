@@ -360,6 +360,17 @@ MIGRATIONS: list[str] = [
             UNION SELECT 'broadcast_subs' UNION SELECT 'broadcast_optouts')
     ) WHERE name = 'kimo' AND json_valid(allowed_tables);
     """,
+    # 8: кэш AI-рекомендаций для Mini App (раз в сутки на пользователя и язык)
+    """
+    CREATE TABLE IF NOT EXISTS ai_advice (
+        owner_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        day        TEXT NOT NULL,
+        lang       TEXT NOT NULL,
+        payload    TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, day, lang)
+    );
+    """,
 ]
 
 # Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
@@ -380,6 +391,7 @@ DOWN_MIGRATIONS: dict[int, str] = {
         DROP INDEX IF EXISTS idx_expenses_user_kind;
         ALTER TABLE expenses DROP COLUMN kind;
     """,
+    8: "DROP TABLE IF EXISTS ai_advice;",
     7: """
         DROP TABLE IF EXISTS broadcast_optouts; DROP TABLE IF EXISTS broadcast_subs;
         DROP TABLE IF EXISTS broadcast_log; DROP TABLE IF EXISTS scheduled_messages;
@@ -839,6 +851,37 @@ class Database:
     async def optout_remove(self, owner_id: int, chat_id: int) -> bool:
         cur = await self._write("DELETE FROM broadcast_optouts WHERE owner_id = ? AND chat_id = ?", (owner_id, chat_id))
         return cur.rowcount > 0
+
+    # ---------- AI-рекомендации (кэш) ----------
+
+    async def advice_get(self, owner_id: int, day: str, lang: str) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM ai_advice WHERE owner_id = ? AND day = ? AND lang = ?", (owner_id, day, lang))
+
+    async def advice_last(self, owner_id: int, lang: str) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM ai_advice WHERE owner_id = ? AND lang = ? ORDER BY day DESC LIMIT 1", (owner_id, lang))
+
+    async def advice_set(self, owner_id: int, day: str, lang: str, payload: str, now: str) -> None:
+        await self._write(
+            """INSERT INTO ai_advice (owner_id, day, lang, payload, created_at) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(owner_id, day, lang) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at""",
+            (owner_id, day, lang, payload, now),
+        )
+
+    async def user_by_id_list(self, ids: list[int]) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        return await self._all(f"SELECT * FROM users WHERE id IN ({marks})", tuple(ids))  # marks — только «?»
+
+    async def task_list_range(self, user_id: int, start: str, end: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Задачи пользователя со сроком в [start, end) (и выполненные, и нет)."""
+        return await self._all(
+            "SELECT * FROM tasks WHERE user_id = ? AND due_at >= ? AND due_at < ? ORDER BY due_at LIMIT ?",
+            (user_id, start, end, limit),
+        )
+
+    async def expense_list(self, user_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        return await self._all("SELECT * FROM expenses WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
 
     # ---------- задачи ----------
 

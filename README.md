@@ -389,6 +389,24 @@ python manage.py agents enable voice_sip     # служба по умолчан�
 - `SUBSCRIPTION_ENABLED=true`: продажа включена. Перезапустите Кимо: `./run.sh restart kimo`.
 - Админ-команды не изменились: `/grant`, `/revoke`, `/users`, `/stats`.
 
+## Mini App: API и публичный адрес
+
+**Процессы.** Бот (Кимо и агенты) и API независимы, общая БД `data/bot.db` (WAL). API запускается отдельно:
+`./run.sh start api` (или `python run_api.py`), слушает только `127.0.0.1:8080` (`API_HOST`, `API_PORT`). Логи: `logs/api.log`.
+
+**Аутентификация.** Каждый запрос идёт с заголовком `Authorization: tma <initData>`. API проверяет HMAC-SHA256 подпись по токену Кимо (берётся из `.env` или зашифрованной таблицы `secrets`, наружу не отдаётся и в логи не пишется), возраст `auth_date` (не старше 24 часов) и затем роль и права по БД: `admin` — `ADMIN_ID`; `user` — активный `/grant`. Нет доступа: ответ 403 `no_access` с вашим ID. Лимиты: 120 запросов в минуту на пользователя, 10 в минуту на ИИ-эндпоинты (`/api/assistant`, `/api/advice`), 20 неудачных проверок в минуту на IP.
+
+**Что делает API.** Все данные фильтруются по `owner_id` (`users.id` из initData, а не из параметров запроса), админские эндпоинты (`/api/agents*`, `/api/access*`, платёжные флаги и статус токенов в `/api/settings`) проверяют роль. Значения токенов и ключей не отдаются никогда, только факт «задан». Запросы к ИИ идут через Кимо по очереди заданий (`tasks_queue`, источник `miniapp`), поэтому общий лимит Groq, приоритеты и лимит на пользователя работают так же, как в чате. Включение/выключение и создание агентов подтверждаются вами в Telegram («да»), токен из BotFather вводится там же, а не в Mini App. AI-рекомендации генерируются раз в сутки на пользователя и язык и кэшируются в `ai_advice`.
+
+Эндпоинты: `/api/me`, `/api/settings`, `/api/home`, `/api/tasks*`, `/api/reminders`, `/api/finance/{summary,series,categories,items}`, `/api/rate`, `/api/advice`, `/api/assistant`, `/api/agents*`, `/api/business*`, `/api/broadcasts*`, `/api/access*`, `/health`.
+
+**Публичный HTTPS без домена: Tailscale Funnel.** Домашний сервер за NAT, а Mini App открывается и у людей вне вашего tailnet, поэтому нужен публичный адрес. Cloudflare Tunnel требует домен в Cloudflare, Funnel нет: адрес вида `https://<узел>.<tailnet>.ts.net` выдаётся бесплатно и не меняется.
+1. Один раз в админке Tailscale (login.tailscale.com): DNS → включить MagicDNS и **HTTPS Certificates**; Access controls → разрешить Funnel (`"nodeAttrs": [{"target": ["autogroup:member"], "attr": ["funnel"]}]`).
+2. На сервере: `./scripts/setup_funnel.sh` (выполняет `tailscale funnel --bg 8080` и печатает адрес).
+3. В `.env`: `MINIAPP_URL=https://<узел>.<tailnet>.ts.net`, затем `./run.sh restart kimo`. Кимо сам поставит кнопку меню чата, а команда `/app` присылает кнопку открытия.
+4. Проверка: `curl -s https://<узел>.<tailnet>.ts.net/health` → `{"ok": true}`.
+Funnel публикует только порт 8080 (API и статику Mini App), остальные порты и SSH остаются доступны лишь по Tailscale. Если Funnel вам не подходит, подойдёт Cloudflare Tunnel на любом домене: направьте его на `http://127.0.0.1:8080` и пропишите тот же `MINIAPP_URL`.
+
 ## Рассылки по расписанию
 
 **Ограничения Telegram Bot API (Кимо их не обходит):**

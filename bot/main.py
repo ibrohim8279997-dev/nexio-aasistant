@@ -7,7 +7,7 @@ import sys
 from typing import Any
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand, ErrorEvent
+from aiogram.types import BotCommand, ErrorEvent, MenuButtonWebApp, WebAppInfo
 
 from bot.agents.access import ScopedDB
 from bot.agents.bus import BusWorker
@@ -32,6 +32,7 @@ log = logging.getLogger("bot")
 
 COMMANDS = [
     BotCommand(command="menu", description="Главное меню"),
+    BotCommand(command="app", description="Открыть Mini App"),
     BotCommand(command="today", description="Задачи на сегодня"),
     BotCommand(command="tomorrow", description="Задачи на завтра"),
     BotCommand(command="add", description="Добавить задачу"),
@@ -127,6 +128,11 @@ async def run_kimo(settings: Settings, ctx: AgentContext, llm: LLMClient, bot: B
         broadcaster = Broadcaster(bot, scoped, settings, llm)
         scheduler.scheduler.add_job(broadcaster.tick, "interval", seconds=60, id="broadcasts", max_instances=1,
                                     coalesce=True, misfire_grace_time=120)
+        if settings.miniapp_url.startswith("https://"):
+            try:  # кнопка меню чата открывает Mini App
+                await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Кимо", web_app=WebAppInfo(url=settings.miniapp_url)))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось поставить кнопку Mini App: %s", type(exc).__name__)
         try:
             await bot.set_my_commands(COMMANDS)
         except Exception as exc:  # noqa: BLE001

@@ -51,6 +51,8 @@ METHOD_TABLES: dict[str, frozenset[str]] = {
         **{m: ["broadcast_log"] for m in ("blog_add", "blog_list", "blog_sent_since")},
         **{m: ["broadcast_subs"] for m in ("bsub_add", "bsub_get", "bsub_list", "bsub_owners_of", "bsub_remove")},
         **{m: ["broadcast_optouts"] for m in ("optout_add", "optout_has", "optout_remove")},
+        "advice_get": ["ai_advice"], "advice_last": ["ai_advice"], "advice_set": ["ai_advice"],
+        "user_by_id_list": ["users"], "task_list_range": ["tasks"], "expense_list": ["expenses"],
         # Telegram Business
         "bconn_upsert": ["business_connections"], "bconn_get": ["business_connections"],
         "bconn_list": ["business_connections"], "bconn_set_ai": ["business_connections"],

@@ -63,6 +63,7 @@ class Settings:
     user_ai_per_day: int = 150
     business_ai_per_min: int = 15  # ответов клиентам Business на владельца в минуту
     business_ai_per_day: int = 300
+    miniapp_url: str = ""  # публичный HTTPS-адрес Mini App (Tailscale Funnel), см. README
 
     @property
     def secret_values(self) -> list[str]:
@@ -101,6 +102,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         user_ai_per_day=_int("USER_AI_PER_DAY", 150),
         business_ai_per_min=_int("BUSINESS_AI_PER_MIN", 15),
         business_ai_per_day=_int("BUSINESS_AI_PER_DAY", 300),
+        miniapp_url=os.getenv("MINIAPP_URL", "").strip().rstrip("/"),
     )
     if settings.admin_id <= 0:
         raise ConfigError("ADMIN_ID должен быть вашим числовым Telegram ID")

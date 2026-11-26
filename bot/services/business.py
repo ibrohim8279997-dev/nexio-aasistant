@@ -190,5 +190,35 @@ def parse_reply(raw: str) -> Reply | None:
     return Reply(text[:MAX_REPLY_LEN], bool(data.get("handoff")), str(data.get("reason") or "")[:200])
 
 
+RULE_FIELDS = {
+    "prompt": "system_prompt", "info": "business_info", "ban": "prohibitions", "tone": "tone", "name": "owner_name",
+    "pause": "pause_hours", "flood": "flood_per_min",
+}
+MAX_RULE_LEN = 3000
+
+
+class RuleError(ValueError):
+    pass
+
+
+def clean_rule(key: str, value: Any) -> tuple[str, Any]:
+    """Ключ правила (prompt/info/ban/tone/name/pause/flood) и значение -> (колонка БД, проверенное значение)."""
+    field = RULE_FIELDS.get(key)
+    if field is None:
+        raise RuleError("Неизвестное поле. Доступны: " + ", ".join(RULE_FIELDS))
+    if key in ("pause", "flood"):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise RuleError("Нужно число: пауза 0–168 часов, ответов в минуту 0–30.") from None
+        if not 0 <= number <= (168 if key == "pause" else 30):
+            raise RuleError("Нужно число: пауза 0–168 часов, ответов в минуту 0–30.")
+        return field, number
+    text = str(value or "").strip()
+    if len(text) > MAX_RULE_LEN:
+        raise RuleError(f"Слишком длинно (максимум {MAX_RULE_LEN} символов).")
+    return field, text
+
+
 def cutoff() -> str:
     return to_db(now_utc() - timedelta(days=RETENTION_DAYS))

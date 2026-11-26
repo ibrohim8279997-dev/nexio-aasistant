@@ -7,8 +7,9 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
+from bot.config import Settings
 from bot.db import Database
 from bot.handlers.common import show
 from bot.timeutil import now_utc, to_db
@@ -59,6 +60,15 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         f"Привет, {escape(name)}! Я ваш личный ассистент.\n\n{HELP_TEXT}",
         reply_markup=main_menu(),
     )
+
+
+@router.message(Command("app"))
+async def cmd_app(message: Message, settings: Settings) -> None:
+    if not settings.miniapp_url.startswith("https://"):
+        await message.answer("Mini App ещё не настроен: нужен публичный HTTPS-адрес (MINIAPP_URL, см. README).")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть Кимо", web_app=WebAppInfo(url=settings.miniapp_url))]])
+    await message.answer("Mini App Кимо:", reply_markup=kb)
 
 
 @router.message(Command("help"), flags={"public": True})
