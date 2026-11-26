@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import Settings
 from bot.db import Database
 from bot.keyboards import reminder_kb, subscription_kb
+from bot.services import grants
 from bot.services import subscription as sub
 from bot.timeutil import TZ, now_utc, to_db
 
@@ -38,6 +39,8 @@ class BotScheduler:
             self.subscription_reminders, "interval", hours=1, id="sub_reminders",
             next_run_time=datetime.now(TZ) + timedelta(seconds=30), **common,
         )
+        self.scheduler.add_job(self.access_grants_job, "interval", minutes=5, id="grants",
+                               next_run_time=datetime.now(TZ) + timedelta(seconds=20), **common)
         self.scheduler.add_job(self.cleanup_business, "interval", hours=24, id="business_cleanup",
                                next_run_time=datetime.now(TZ) + timedelta(minutes=2), **common)
         if self.system_db is not None:
@@ -48,9 +51,6 @@ class BotScheduler:
     def shutdown(self) -> None:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
-
-    def has_access(self, tg_id: int, sub_until: str | None) -> bool:
-        return sub.has_access(tg_id, sub_until, self.settings.admin_id)
 
     async def _send(self, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> bool | None:
         """True — доставлено, False — не доставить никогда (бот заблокирован), None — повторить позже."""
@@ -75,7 +75,8 @@ class BotScheduler:
             not_before = to_db(now - STALE_AFTER)
             await self.db.skip_stale_reminders(not_before)
             for row in await self.db.due_reminders(to_db(now), not_before):
-                if not self.has_access(row["tg_id"], row["sub_until"]):
+                owner = {"id": row["user_id"], "tg_id": row["tg_id"], "sub_until": row["sub_until"]}
+                if not await grants.has_access(self.db, owner, self.settings):
                     await self.db.mark_reminded(row["id"])
                     continue
                 result = await self._send(
@@ -111,6 +112,19 @@ class BotScheduler:
                 await self.db.mark_sub_notified(user["id"])
         except Exception:  # noqa: BLE001
             log.exception("Ошибка в задаче напоминаний о подписке")
+
+    async def access_grants_job(self) -> None:
+        """Автоотзыв истёкших доступов и уведомление за 1 день до конца."""
+        try:
+            for row in await grants.due_reminders(self.db):
+                left = grants.fmt(row["expires_at"])
+                if await self._send(row["tg_id"], f"⏳ Ваш доступ к Кимо заканчивается {left}. Чтобы продлить, напишите владельцу."):
+                    await self.db.grant_mark_notified(row["id"])
+            for row in await grants.expire_due(self.db):
+                await self._send(row["tg_id"], "⛔ Срок вашего доступа к Кимо закончился. Чтобы продолжить, напишите владельцу.")
+                await self._send(self.settings.admin_id, f"ℹ️ Доступ пользователя {row['tg_id']} закончился и отозван.")
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка в задаче доступов")
 
     async def cleanup_business(self) -> None:
         """Журнал диалогов Business хранится 30 дней."""

@@ -16,8 +16,9 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from bot.agents.registry import TOKEN_RE
 
 from bot.keyboards import subscription_kb
+from bot.services import grants as grants_svc
 from bot.services import perms as perms_svc
-from bot.services.subscription import PAYWALL_TEXT, PRIVATE_TEXT, has_access
+from bot.services.subscription import PAYWALL_TEXT
 from bot.timeutil import now_utc, to_db
 
 log = logging.getLogger(__name__)
@@ -82,13 +83,14 @@ class AccessMiddleware(BaseMiddleware):
             return await handler(event, data)
         settings = data["settings"]
         db_user = data.get("db_user")
-        if db_user and has_access(db_user["tg_id"], db_user["sub_until"], settings.admin_id):
+        if db_user and await grants_svc.has_access(data["db"], db_user, settings):
             return await handler(event, data)
         if settings.subscription_enabled:
             text = PAYWALL_TEXT
             markup = subscription_kb(settings.sub_price_xtr, settings.click_enabled, settings.click_price_uzs)
-        else:  # подписка выключена: бот личный, без кнопок оплаты
-            text, markup = PRIVATE_TEXT, None
+        else:  # подписка выключена: бот личный, без кнопок оплаты; говорим, как получить доступ
+            text, markup = grants_svc.no_access_text(db_user["tg_id"] if db_user else 0), None
+            await self._request_notice(event, db_user, settings)
         state = data.get("state")
         if state is not None:
             await state.clear()
@@ -99,6 +101,25 @@ class AccessMiddleware(BaseMiddleware):
             if event.bot is not None:
                 await event.bot.send_message(event.from_user.id, text, reply_markup=markup)
         return None
+
+    _requested: dict[int, float] = {}
+
+    @classmethod
+    async def _request_notice(cls, event: TelegramObject, db_user: dict[str, Any] | None, settings: Any) -> None:
+        """Владельцу — запрос доступа (не чаще раза в сутки от одного человека)."""
+        if db_user is None or getattr(event, "bot", None) is None:
+            return
+        if time.monotonic() - cls._requested.get(db_user["tg_id"], -1e9) < 86400:
+            return
+        cls._requested[db_user["tg_id"]] = time.monotonic()
+        name = f"@{db_user['username']}" if db_user.get("username") else (db_user.get("first_name") or "—")
+        try:
+            await event.bot.send_message(
+                settings.admin_id, f"🔔 Запрос доступа: {name}, ID {db_user['tg_id']}\nВыдать: /grant {db_user['tg_id']} 30",
+                parse_mode=None,
+            )
+        except TelegramAPIError:
+            pass
 
 
 NO_PERM_TEXT = "🔒 Эта функция вам недоступна. Её может включить владелец."

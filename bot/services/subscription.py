@@ -100,7 +100,7 @@ async def revoke(db: Database, user: dict[str, Any]) -> None:
     await db.set_sub_until(user["id"], None)
 
 
-def status_text(user: dict[str, Any], settings: Settings) -> str:
+def status_text(user: dict[str, Any], settings: Settings, grant_until: str | None = None) -> str:
     now = now_utc()
     if user["tg_id"] == settings.admin_id:
         state = "включена" if settings.subscription_enabled else "выключена (SUBSCRIPTION_ENABLED=false)"
@@ -108,6 +108,8 @@ def status_text(user: dict[str, Any], settings: Settings) -> str:
     if not settings.subscription_enabled:
         if is_active(user.get("sub_until"), now):
             return f"⭐ <b>Доступ открыт</b> до {fmt_until(user['sub_until'])}."
+        if is_active(grant_until, now):
+            return f"⭐ <b>Доступ открыт</b> до {fmt_until(grant_until)}."
         return PRIVATE_TEXT
     price = f"{settings.sub_price_xtr} ⭐ за {settings.sub_days} дней"
     if is_active(user.get("sub_until"), now):

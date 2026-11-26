@@ -281,6 +281,31 @@ MIGRATIONS: list[str] = [
             UNION SELECT 'business_chats' UNION SELECT 'business_messages')
     ) WHERE name = 'kimo' AND json_valid(allowed_tables);
     """,
+    # 6: доступы по /grant (роль user), с автоотзывом по сроку
+    """
+    CREATE TABLE IF NOT EXISTS access_grants (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        granted_by  INTEGER NOT NULL DEFAULT 0,
+        expires_at  TEXT NOT NULL,
+        active      INTEGER NOT NULL DEFAULT 1,
+        notified_1d INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        ended_at    TEXT,
+        end_reason  TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_one_active ON access_grants(user_id) WHERE active = 1;
+    CREATE INDEX IF NOT EXISTS idx_grants_expires ON access_grants(active, expires_at);
+
+    -- доступы, выданные прежней командой /grant (через users.sub_until), переносятся как активные
+    INSERT OR IGNORE INTO access_grants (user_id, granted_by, expires_at, active, created_at)
+        SELECT id, 0, sub_until, 1, created_at FROM users WHERE sub_until IS NOT NULL AND sub_until > datetime('now');
+
+    UPDATE agents SET allowed_tables = (
+        SELECT json_group_array(value) FROM (
+            SELECT value FROM json_each(agents.allowed_tables) UNION SELECT 'access_grants')
+    ) WHERE name = 'kimo' AND json_valid(allowed_tables);
+    """,
 ]
 
 # Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
@@ -301,6 +326,7 @@ DOWN_MIGRATIONS: dict[int, str] = {
         DROP INDEX IF EXISTS idx_expenses_user_kind;
         ALTER TABLE expenses DROP COLUMN kind;
     """,
+    6: "DROP TABLE IF EXISTS access_grants;",
     5: """
         DROP TABLE IF EXISTS business_messages; DROP TABLE IF EXISTS business_chats;
         DROP TABLE IF EXISTS business_rules; DROP TABLE IF EXISTS business_connections;
@@ -614,6 +640,56 @@ class Database:
     async def bmsg_cleanup(self, before: str) -> int:
         cur = await self._write("DELETE FROM business_messages WHERE created_at < ?", (before,))
         return cur.rowcount
+
+    # ---------- доступы (/grant) ----------
+
+    async def grant_active(self, user_id: int) -> dict[str, Any] | None:
+        return await self._one("SELECT * FROM access_grants WHERE user_id = ? AND active = 1", (user_id,))
+
+    async def grant_upsert(self, user_id: int, granted_by: int, expires_at: str, now: str) -> int:
+        existing = await self.grant_active(user_id)
+        if existing:
+            await self._write(
+                "UPDATE access_grants SET expires_at = ?, granted_by = ?, notified_1d = 0 WHERE id = ?",
+                (expires_at, granted_by, existing["id"]),
+            )
+            return int(existing["id"])
+        cur = await self._write(
+            "INSERT INTO access_grants (user_id, granted_by, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, granted_by, expires_at, now),
+        )
+        return int(cur.lastrowid)
+
+    async def grant_close(self, grant_id: int, reason: str, now: str) -> bool:
+        cur = await self._write(
+            "UPDATE access_grants SET active = 0, ended_at = ?, end_reason = ? WHERE id = ? AND active = 1",
+            (now, reason, grant_id),
+        )
+        return cur.rowcount > 0
+
+    async def grants_list_active(self, now: str) -> list[dict[str, Any]]:
+        return await self._all(
+            """SELECT g.*, u.tg_id, u.username, u.first_name FROM access_grants g JOIN users u ON u.id = g.user_id
+               WHERE g.active = 1 AND g.expires_at > ? ORDER BY g.expires_at""",
+            (now,),
+        )
+
+    async def grants_expired(self, now: str) -> list[dict[str, Any]]:
+        return await self._all(
+            """SELECT g.*, u.tg_id FROM access_grants g JOIN users u ON u.id = g.user_id
+               WHERE g.active = 1 AND g.expires_at <= ?""",
+            (now,),
+        )
+
+    async def grants_to_remind(self, now: str, until: str) -> list[dict[str, Any]]:
+        return await self._all(
+            """SELECT g.*, u.tg_id FROM access_grants g JOIN users u ON u.id = g.user_id
+               WHERE g.active = 1 AND g.notified_1d = 0 AND g.expires_at > ? AND g.expires_at <= ?""",
+            (now, until),
+        )
+
+    async def grant_mark_notified(self, grant_id: int) -> None:
+        await self._write("UPDATE access_grants SET notified_1d = 1 WHERE id = ?", (grant_id,))
 
     # ---------- задачи ----------
 

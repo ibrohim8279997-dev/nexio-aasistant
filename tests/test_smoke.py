@@ -147,19 +147,19 @@ async def test_admin_commands(app, db):
     dp, bot, _ = app
     await dp.feed_update(bot, message_update(ADMIN_ID, "/grant 4242 10"))
     user = await db.get_user_by_tg(4242)
-    assert user and user["sub_until"]
+    assert user and await db.grant_active(user["id"])
     await dp.feed_update(bot, message_update(ADMIN_ID, "/users"))
     assert "4242" in bot.texts()[-1]
     await dp.feed_update(bot, message_update(ADMIN_ID, "/stats"))
     assert "Пользователей" in bot.texts()[-1]
     await dp.feed_update(bot, message_update(ADMIN_ID, "/revoke 4242"))
-    assert (await db.get_user_by_tg(4242))["sub_until"] is None
+    assert await db.grant_active(user["id"]) is None
     await dp.feed_update(bot, message_update(ADMIN_ID, "/setsecret click_provider_token 1:TEST:x"))
     assert "DeleteMessage" in bot.methods()
 
     # не-админ не может выдать себе доступ
     await dp.feed_update(bot, message_update(4242, "/grant 4242 999"))
-    assert (await db.get_user_by_tg(4242))["sub_until"] is None
+    assert await db.grant_active(user["id"]) is None
 
 
 async def test_subscription_reminder(app, db):

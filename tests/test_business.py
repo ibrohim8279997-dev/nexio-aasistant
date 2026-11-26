@@ -264,11 +264,11 @@ async def test_user_without_access_gets_no_ai_replies(app, db, groq):
 
 
 async def test_user_with_grant_replies_and_data_is_isolated(app, db, groq):
-    from bot.services import subscription as sub
+    from bot.services import grants
 
     dp, bot, _ = app
     user = await db.ensure_user(555, to_db(now_utc()))
-    await sub.grant(db, user, 5)
+    await grants.grant(db, user, 5, ADMIN_ID)
     await connect(app)
     await connect(app, owner_tg=555, conn_id="c-555")
     groq.replies += [reply_json("от тони"), reply_json("от пользователя")]
@@ -292,9 +292,9 @@ async def test_user_without_business_perm_is_silent(app, db, groq):
     owner = await db.get_user_by_tg(OWNER)
     user = await db.ensure_user(555, to_db(now_utc()))
     await db.set_user_setting(user["id"], "x", "1")
-    from bot.services import subscription as sub
+    from bot.services import grants
 
-    await sub.grant(db, user, 5)
+    await grants.grant(db, user, 5, ADMIN_ID)
     await perms.set_perm(db, user, "business", False)
     await connect(app, owner_tg=555, conn_id="c-555")
     await dp.feed_update(bot, biz_update(CLIENT, "привет", conn_id="c-555"))

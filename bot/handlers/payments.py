@@ -36,15 +36,23 @@ async def _sales_closed(call: CallbackQuery, settings: Settings) -> bool:
     return True
 
 
+async def _grant_until(db: Database, user: dict[str, Any]) -> str | None:
+    from bot.services import grants
+    from bot.timeutil import to_db
+
+    until = await grants.active_until(db, user)
+    return to_db(until) if until else None
+
+
 @router.message(Command("subscription"), flags=PUBLIC)
-async def cmd_subscription(message: Message, settings: Settings, db_user: dict[str, Any]) -> None:
-    await message.answer(sub.status_text(db_user, settings), reply_markup=_sub_kb(settings))
+async def cmd_subscription(message: Message, settings: Settings, db_user: dict[str, Any], db: Database) -> None:
+    await message.answer(sub.status_text(db_user, settings, await _grant_until(db, db_user)), reply_markup=_sub_kb(settings))
 
 
 @router.callback_query(Menu.filter(F.name == "sub"), flags=PUBLIC)
-async def cb_subscription(call: CallbackQuery, settings: Settings, db_user: dict[str, Any]) -> None:
+async def cb_subscription(call: CallbackQuery, settings: Settings, db_user: dict[str, Any], db: Database) -> None:
     await call.answer()
-    await show(call, sub.status_text(db_user, settings), _sub_kb(settings))
+    await show(call, sub.status_text(db_user, settings, await _grant_until(db, db_user)), _sub_kb(settings))
 
 
 @router.message(Command("paysupport"), flags=PUBLIC)

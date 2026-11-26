@@ -20,7 +20,7 @@ from bot.db import Database
 from bot.middlewares import PermMiddleware
 from bot.services import business as biz
 from bot.services import perms as perms_svc
-from bot.services import subscription as sub
+from bot.services import grants as grants_svc
 from bot.timeutil import now_utc, to_db
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def budget_for(settings: Settings) -> UserLimiter:
 
 async def owner_allowed(db: Any, owner: dict[str, Any], settings: Settings) -> bool:
     """Есть ли у владельца подключения доступ к Кимо и право business (точка подмены на access_grants в этапе 3)."""
-    if not sub.has_access(owner["tg_id"], owner["sub_until"], settings.admin_id):
+    if not await grants_svc.has_access(db, owner, settings):
         return False
     return await perms_svc.can(db, owner, "business", settings.admin_id)
 

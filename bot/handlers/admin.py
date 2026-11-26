@@ -11,19 +11,19 @@ from aiogram.types import Message
 from bot.config import Settings
 from bot.crypto import SecretStore
 from bot.db import Database
-from bot.services import perms
+from bot.services import grants, perms
 from bot.services import subscription as sub
 from bot.timeutil import now_utc, to_db
 
 router = Router(name="admin")
 
-MAX_GRANT_DAYS = 3650
 SECRET_NAME_RE = re.compile(r"^[a-z0-9_]{1,50}$")
 
 ADMIN_HELP = (
     "<b>Админ-команды</b>\n"
     "/grant &lt;user_id&gt; &lt;дней&gt; — выдать/продлить доступ\n"
     "/revoke &lt;user_id&gt; — отключить доступ\n"
+    "/grants — активные доступы\n"
     "/users [страница] — пользователи\n"
     "/perm &lt;user_id&gt; [право on|off] — права пользователя (tasks, finance, reminders, business, broadcasts, assistant)\n"
     "/stats — статистика бота\n"
@@ -56,20 +56,26 @@ async def cmd_grant(message: Message, command: CommandObject, bot: Bot, db: Data
         await message.answer("Формат: /grant &lt;user_id&gt; &lt;дней&gt;")
         return
     tg_id, days = int(args[0]), int(args[1])
-    if not 1 <= days <= MAX_GRANT_DAYS:
-        await message.answer(f"Дней: от 1 до {MAX_GRANT_DAYS}.")
-        return
     user = await db.ensure_user(tg_id, to_db(now_utc()))
-    until = await sub.grant(db, user, days)
-    await message.answer(f"✅ Доступ для {tg_id} до {sub.fmt_until(to_db(until))}")
     try:
-        await bot.send_message(tg_id, f"🎁 Вам открыт доступ к ассистенту до {sub.fmt_until(to_db(until))}. /menu")
+        until = await grants.grant(db, user, days, granted_by=message.from_user.id)
+    except grants.GrantError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+    await message.answer(f"✅ Доступ для {tg_id} до {grants.fmt(until)}")
+    try:
+        await bot.send_message(
+            tg_id,
+            f"🎁 Вам открыт доступ к Кимо до {grants.fmt(until)}. /menu\n"
+            "Чтобы Кимо отвечал вашим клиентам: Telegram → Настройки → Telegram Business → Чат-боты.",
+            parse_mode=None,
+        )
     except TelegramAPIError:
         await message.answer("(Пользователь ещё не запускал бота — уведомление не отправлено.)")
 
 
 @router.message(Command("revoke"))
-async def cmd_revoke(message: Message, command: CommandObject, db: Database) -> None:
+async def cmd_revoke(message: Message, command: CommandObject, bot: Bot, db: Database) -> None:
     args = _args(command)
     if len(args) != 1 or not args[0].isdigit():
         await message.answer("Формат: /revoke &lt;user_id&gt;")
@@ -78,8 +84,27 @@ async def cmd_revoke(message: Message, command: CommandObject, db: Database) -> 
     if user is None:
         await message.answer("Пользователь не найден.")
         return
-    await sub.revoke(db, user)
+    if not await grants.revoke(db, user):
+        await message.answer("У пользователя нет активного доступа.")
+        return
     await message.answer(f"⛔ Доступ для {user['tg_id']} отключён.")
+    try:
+        await bot.send_message(user["tg_id"], "⛔ Ваш доступ к Кимо отключён.", parse_mode=None)
+    except TelegramAPIError:
+        pass
+
+
+@router.message(Command("grants"))
+async def cmd_grants(message: Message, db: Database) -> None:
+    rows = await db.grants_list_active(to_db(now_utc()))
+    if not rows:
+        await message.answer("Активных доступов нет.")
+        return
+    lines = [f"<b>Активные доступы</b> ({len(rows)})"]
+    for g in rows:
+        name = f"@{g['username']}" if g["username"] else (g["first_name"] or "")
+        lines.append(f"<code>{g['tg_id']}</code> {escape(name)} — до {grants.fmt(g['expires_at'])}")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("perm"))

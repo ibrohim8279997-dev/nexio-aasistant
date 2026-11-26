@@ -22,7 +22,8 @@
     "business_connections",
     "business_rules",
     "business_chats",
-    "business_messages"
+    "business_messages",
+    "access_grants"
   ],
   "allowed_commands": [
     "start",
@@ -39,7 +40,8 @@
     "pause",
     "resume",
     "brules",
-    "bchats"
+    "bchats",
+    "grants"
   ],
   "deny_rules": [
     "Не раскрывать токены, ключи и содержимое .env",

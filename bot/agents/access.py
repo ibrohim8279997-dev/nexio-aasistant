@@ -41,6 +41,10 @@ METHOD_TABLES: dict[str, frozenset[str]] = {
         # права и настройки пользователей
         "user_perm_rows": ["user_perms"], "set_user_perm": ["user_perms"],
         "get_user_setting": ["user_settings"], "user_settings": ["user_settings"], "set_user_setting": ["user_settings"],
+        # доступы
+        "grant_active": ["access_grants"], "grant_upsert": ["access_grants"], "grant_close": ["access_grants"],
+        "grants_list_active": ["access_grants", "users"], "grants_expired": ["access_grants", "users"],
+        "grants_to_remind": ["access_grants", "users"], "grant_mark_notified": ["access_grants"],
         # Telegram Business
         "bconn_upsert": ["business_connections"], "bconn_get": ["business_connections"],
         "bconn_list": ["business_connections"], "bconn_set_ai": ["business_connections"],
