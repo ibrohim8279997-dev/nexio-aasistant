@@ -13,7 +13,7 @@ command -v ngrok >/dev/null || { echo "ngrok не найден: поставьт
 mkdir -p "$(dirname "$FILE")"
 old="$(cat "$FILE" 2>/dev/null || true)"
 
-ARGS=(http "$PORT" --log=stdout --log-level=warn)
+ARGS=(http "127.0.0.1:$PORT" --log=stdout --log-level=warn)   # именно 127.0.0.1: «localhost» ngrok открывает как IPv6 (::1), а API слушает IPv4
 [ -n "${NGROK_DOMAIN:-}" ] && ARGS+=(--url="${NGROK_DOMAIN}")
 ngrok "${ARGS[@]}" &
 NG=$!
