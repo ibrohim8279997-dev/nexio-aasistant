@@ -67,3 +67,25 @@ if (miss.length){console.log(miss.join(' '));process.exit(1)}
     import os
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, env={**os.environ, "WEBAPP_DIR": str(WEBAPP)})
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_miniapp_url_from_env_then_ngrok_file(tmp_path, monkeypatch):
+    from bot.config import _miniapp_url
+
+    monkeypatch.delenv("MINIAPP_URL", raising=False)
+    db_path = tmp_path / "data" / "bot.db"
+    db_path.parent.mkdir()
+    assert _miniapp_url(db_path) == ""  # ничего не задано
+    (db_path.parent / "miniapp_url").write_text("https://abc.ngrok-free.app\n", encoding="utf-8")
+    assert _miniapp_url(db_path) == "https://abc.ngrok-free.app"  # адрес от ngrok
+    monkeypatch.setenv("MINIAPP_URL", "https://kimo.example.ts.net/")
+    assert _miniapp_url(db_path) == "https://kimo.example.ts.net"  # .env важнее файла
+    monkeypatch.setenv("MINIAPP_URL", "http://insecure.example")
+    assert _miniapp_url(db_path) == ""  # только HTTPS
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="нужен bash")
+def test_shell_scripts_have_valid_syntax():
+    root = Path(__file__).resolve().parent.parent
+    for script in ("run.sh", "run_all.sh", "scripts/ngrok_tunnel.sh", "scripts/setup_funnel.sh"):
+        subprocess.run(["bash", "-n", str(root / script)], check=True)

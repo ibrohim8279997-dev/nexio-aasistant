@@ -412,6 +412,14 @@ python manage.py agents enable voice_sip     # служба по умолчан�
 2. На сервере: `./scripts/setup_funnel.sh` (выполняет `tailscale funnel --bg 8080` и печатает адрес).
 3. В `.env`: `MINIAPP_URL=https://<узел>.<tailnet>.ts.net`, затем `./run.sh restart kimo`. Кимо сам поставит кнопку меню чата, а команда `/app` присылает кнопку открытия.
 4. Проверка: `curl -s https://<узел>.<tailnet>.ts.net/health` → `{"ok": true}`.
+### Вариант: ngrok прямо из `./run_all.sh`
+
+`./run_all.sh` теперь сам поднимает API (окно `api`) и туннель ngrok (окно `ngrok`) до Кимо, ждёт адрес, печатает его и пишет в `data/miniapp_url`. Кимо при старте берёт адрес оттуда (если `MINIAPP_URL` в `.env` не задан) и ставит кнопку меню Mini App. После каждого `./run_all.sh restart` адрес появляется заново, ничего вписывать не нужно.
+1. Установите ngrok для Linux arm64 (с ngrok.com/download, внутри proot-Debian) и один раз выполните `ngrok config add-authtoken <токен>`.
+2. `./run_all.sh restart`. В конце выведется `Mini App: https://....ngrok-free.app`, адрес также виден в `tmux attach -t agents`, окно `ngrok`.
+3. Если запустить только ngrok (`./run.sh restart ngrok`) и адрес сменится, Кимо перезапустится сам (отключить: `NGROK_RESTART_KIMO=0`).
+Бесплатный адрес ngrok меняется при каждом запуске. Постоянный: в кабинете ngrok создайте бесплатный static domain и впишите `NGROK_DOMAIN=имя.ngrok-free.app` в `.env`. Минус бесплатного ngrok: при первом открытии страницы он может показать предупреждение «You are about to visit…» (кнопка «Visit Site», потом работает). Платный тариф или Tailscale Funnel это убирают. Если задан `MINIAPP_URL` (например, Funnel), ngrok не запускается; отключить вручную: `START_NGROK=0`.
+
 Funnel публикует только порт 8080 (API и статику Mini App), остальные порты и SSH остаются доступны лишь по Tailscale. Если Funnel вам не подходит, подойдёт Cloudflare Tunnel на любом домене: направьте его на `http://127.0.0.1:8080` и пропишите тот же `MINIAPP_URL`.
 
 ## Mini App: интерфейс

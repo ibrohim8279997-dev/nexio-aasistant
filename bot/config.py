@@ -73,6 +73,17 @@ class Settings:
         return [v for v in values if v]
 
 
+def _miniapp_url(db_path: Path) -> str:
+    """MINIAPP_URL из .env, а если не задан — адрес, который записал туннель ngrok (data/miniapp_url)."""
+    url = os.getenv("MINIAPP_URL", "").strip()
+    if not url:
+        try:
+            url = (db_path.parent / "miniapp_url").read_text(encoding="utf-8").strip()
+        except OSError:
+            url = ""
+    return url.rstrip("/") if url.startswith("https://") else ""
+
+
 def load_settings(env_file: Path | None = None) -> Settings:
     load_dotenv(env_file or BASE_DIR / ".env")
 
@@ -102,7 +113,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         user_ai_per_day=_int("USER_AI_PER_DAY", 150),
         business_ai_per_min=_int("BUSINESS_AI_PER_MIN", 15),
         business_ai_per_day=_int("BUSINESS_AI_PER_DAY", 300),
-        miniapp_url=os.getenv("MINIAPP_URL", "").strip().rstrip("/"),
+        miniapp_url=_miniapp_url(db_path),
     )
     if settings.admin_id <= 0:
         raise ConfigError("ADMIN_ID должен быть вашим числовым Telegram ID")

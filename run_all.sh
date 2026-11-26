@@ -14,6 +14,25 @@ case "${1:-start}" in
   start)
     names="$(python manage.py agents enabled)" || { echo "Не удалось прочитать список агентов"; exit 1; }
     [ -n "$names" ] || { echo "Нет включённых агентов"; exit 0; }
+    # Mini App: API и туннель ngrok поднимаются до Кимо, чтобы он при старте знал публичный адрес.
+    # Выключить: START_API=0 (без API) или START_NGROK=0 (адрес задан в .env через MINIAPP_URL или Tailscale Funnel).
+    if [ "${START_API:-1}" = "1" ]; then
+      ./run.sh start api
+      if [ "${START_NGROK:-1}" = "1" ] && [ -z "${MINIAPP_URL:-}" ] && ! grep -q '^MINIAPP_URL=.\+' .env 2>/dev/null; then
+        if command -v ngrok >/dev/null 2>&1; then
+          rm -f "${NGROK_URL_FILE:-data/miniapp_url}"      # старый адрес не берём: ждём новый
+          ./run.sh start ngrok
+          for _ in $(seq 1 45); do [ -s "${NGROK_URL_FILE:-data/miniapp_url}" ] && break; sleep 1; done
+          if [ -s "${NGROK_URL_FILE:-data/miniapp_url}" ]; then
+            echo "Mini App: $(cat "${NGROK_URL_FILE:-data/miniapp_url}")"
+          else
+            echo "ngrok не дал адрес за 45 с: tmux attach -t $SESSION, окно ngrok (authtoken: ngrok config add-authtoken ...)"
+          fi
+        else
+          echo "ngrok не установлен: Mini App без публичного адреса (см. README, раздел про ngrok)."
+        fi
+      fi
+    fi
     # Кимо первым: остальные агенты обращаются к нему через шину
     if grep -qx kimo <<<"$names"; then ./run.sh start kimo; sleep 3; fi
     for name in $names; do
