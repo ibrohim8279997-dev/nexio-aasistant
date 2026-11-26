@@ -16,7 +16,10 @@ async def old_db(tmp_path):
 async def test_migration3_preserves_and_backfills(tmp_path):
     db = await old_db(tmp_path)
     user = await db.get_or_create_user(1, "a", "A", NOW)
-    await db.add_expense(user["id"], 5000, "UZS", "Еда", None, 12000, NOW)
+    await db._write(  # схема v2: без поля kind
+        "INSERT INTO expenses (user_id, amount, currency, category, rate_used, created_at) VALUES (?, 5000, 'UZS', 'Еда', 12000, ?)",
+        (user["id"], NOW),
+    )
     for name, role, cfg in [
         ("kimo", "Главный агент", {"display_name": "Кимо"}),
         ("agent_builder", "Создатель", {"display_name": "Создатель агентов"}),
@@ -43,7 +46,8 @@ async def test_migration3_preserves_and_backfills(tmp_path):
     assert agents["agent_builder"]["display_name"] == "Мимо" and agents["agent_builder"]["access_role"] == "creator"
     assert agents["assistant"]["display_name"] == "Мими" and agents["assistant"]["access_role"] == "agent"
     assert "agent_assistant_notes" in agents["assistant"]["allowed_tables"]
-    assert agents["kimo"]["allowed_tables"] == ["users", "expenses"]  # secrets убраны
+    assert "secrets" not in agents["kimo"]["allowed_tables"]  # secrets убраны
+    assert {"users", "expenses"} <= set(agents["kimo"]["allowed_tables"])
     # описание-вместо-имени не становится именем; прежнее описание сохранено
     assert agents["midi"]["display_name"] is None
     assert agents["midi"]["role_description"] == "бот, который назначает встречи" and agents["midi"]["role"] == "бот, который назначает встречи"

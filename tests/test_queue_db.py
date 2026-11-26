@@ -10,7 +10,10 @@ async def test_migration_from_v1_backs_up_and_keeps_data(tmp_path):
     # имитируем старую БД версии 1 с данными
     await db.conn.executescript(f"BEGIN;\n{MIGRATIONS[0]}\nPRAGMA user_version = 1;\nCOMMIT;")
     user = await db.get_or_create_user(1, "a", "A", NOW)
-    await db.add_expense(user["id"], 5000, "UZS", "Еда", None, 12000, NOW)
+    await db._write(  # схема v1: без поля kind
+        "INSERT INTO expenses (user_id, amount, currency, category, rate_used, created_at) VALUES (?, 5000, 'UZS', 'Еда', 12000, ?)",
+        (user["id"], NOW),
+    )
     await db.migrate()
     assert await db.schema_version() == len(MIGRATIONS)
     assert len(list((tmp_path / "backups").glob("*before-v2.db"))) == 1
