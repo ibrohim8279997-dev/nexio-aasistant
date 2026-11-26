@@ -22,7 +22,7 @@ async def test_migration_from_v1_backs_up_and_keeps_data(tmp_path):
     await db.downgrade(1)
     assert await db.schema_version() == 1
     assert await db._one("SELECT name FROM sqlite_master WHERE name = 'tasks_queue'") is None
-    assert len(await db.expenses_between(user["id"], "2000-01-01 00:00:00", "2100-01-01 00:00:00")) == 1
+    assert (await db._one("SELECT COUNT(*) AS n FROM expenses WHERE user_id = ?", (user["id"],)))["n"] == 1  # v1 без kind
     await db.migrate()
     assert await db.schema_version() == len(MIGRATIONS)
     await db.close()
