@@ -16,14 +16,18 @@ from aiogram.types import Message
 from bot.agents.context import AgentContext
 from bot.ai.groq_client import GroqClient, GroqError
 from bot.config import Settings
+from bot.middlewares import PermMiddleware
 from bot.db import Database
 from bot.services import assistant, pipeline
+from bot.services import perms as perms_svc
 from bot.services.rates import RatesService
 from bot.agents.bus import plain_text
 from bot.voice.tg import voice_reply
 
 log = logging.getLogger(__name__)
 router = Router(name="assistant")
+router.message.middleware(PermMiddleware("assistant"))
+router.callback_query.middleware(PermMiddleware("assistant"))
 
 MAX_TEXT_LEN = 1000
 TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # Bot API не отдаёт файлы больше 20 МБ
@@ -55,6 +59,15 @@ async def send(message: Message, text: str, markup: Any = None) -> None:
         await message.answer(text, reply_markup=markup)
 
 
+def llm_for(groq: Any, db_user: dict[str, Any], settings: Settings) -> Any:
+    """Обычному пользователю — клиентский приоритет и лимит обращений на него; владельцу — без ограничений."""
+    if db_user["tg_id"] == settings.admin_id or not hasattr(groq, "bound"):
+        return groq
+    from bot.ai.queue import P_CLIENT
+
+    return groq.bound(P_CLIENT, owner=db_user["id"])
+
+
 async def make_deps(
     message: Message,
     db: Database,
@@ -64,6 +77,7 @@ async def make_deps(
     settings: Settings,
 ) -> assistant.AssistantDeps:
     return assistant.AssistantDeps(
+        perms=await perms_svc.effective_perms(db, db_user, settings.admin_id),
         db=db,
         user=db_user,
         rates=rates,
@@ -117,6 +131,7 @@ async def on_voice(
     synth: Any = None,
 ) -> None:
     await state.clear()
+    groq = llm_for(groq, db_user, settings)
     media = message.voice or message.audio
     if media is None:
         return
@@ -161,4 +176,4 @@ async def on_text(
     settings: Settings,
 ) -> None:
     deps = await make_deps(message, db, db_user, rates, agent_ctx, settings)
-    await process_text(message, message.text or "", bot, groq, deps)
+    await process_text(message, message.text or "", bot, llm_for(groq, db_user, settings), deps)

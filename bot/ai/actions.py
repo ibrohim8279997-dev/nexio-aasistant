@@ -42,6 +42,12 @@ class AddExpense(_Base):
     currency: Literal["UZS", "USD"] = "UZS"
     category: str = Field(default="Другое", min_length=1, max_length=MAX_CATEGORY_LEN)
     note: str | None = Field(default=None, max_length=MAX_NOTE_LEN)
+    kind: Literal["expense", "income"] = "expense"  # income — доход
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _norm_kind(cls, v: Any) -> Any:
+        return "expense" if not v else str(v).strip().lower()
 
     @field_validator("currency", mode="before")
     @classmethod
@@ -239,7 +245,7 @@ SYSTEM_PROMPT = """{identity}
 
 Типы действий:
 1. {{"type":"add_task","text":"<что сделать>","date":"YYYY-MM-DD"|null,"time":"HH:MM"|null}}
-2. {{"type":"add_expense","amount":<число>,"currency":"UZS"|"USD","category":"<категория>","note":"<заметка>"|null}}
+2. {{"type":"add_expense","amount":<число>,"currency":"UZS"|"USD","category":"<категория>","note":"<заметка>"|null,"kind":"expense"|"income"}} — kind=income для дохода (зарплата, оплата от клиента, продал, получил деньги); по умолчанию expense
 3. {{"type":"complete_task","task_id":<id из списка открытых задач>}}
 4. {{"type":"list_tasks","day":"today"|"tomorrow"}}
 5. {{"type":"show_stats","topic":"expenses"|"tasks","period":"day"|"week"|"month"}}

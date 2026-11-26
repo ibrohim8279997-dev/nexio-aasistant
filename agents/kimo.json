@@ -16,7 +16,9 @@
     "tasks",
     "expenses",
     "payments",
-    "rates_cache"
+    "rates_cache",
+    "user_perms",
+    "user_settings"
   ],
   "allowed_commands": [
     "start",
@@ -25,6 +27,7 @@
     "tomorrow",
     "add",
     "spend",
+    "income",
     "subscription",
     "paysupport",
     "help",

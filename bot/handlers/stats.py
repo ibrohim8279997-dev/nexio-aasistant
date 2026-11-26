@@ -10,6 +10,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery
 
+from bot.middlewares import PermMiddleware
 from bot.db import Database
 from bot.handlers.common import show
 from bot.keyboards import Menu, StatsCb, stats_menu
@@ -20,6 +21,8 @@ from bot.timeutil import now_local, period_bounds
 
 log = logging.getLogger(__name__)
 router = Router(name="stats")
+router.message.middleware(PermMiddleware("finance"))
+router.callback_query.middleware(PermMiddleware("finance"))
 
 CHART_DAYS = 30
 TASK_CHART_DAYS = 14
@@ -71,7 +74,7 @@ async def cb_exp_cat(call: CallbackQuery, db: Database, rates: RatesService, db_
     await _send_chart(call, png, "🥧 Расходы по категориям за 30 дней")
 
 
-@router.callback_query(StatsCb.filter(F.action == "tasks_days"))
+@router.callback_query(StatsCb.filter(F.action == "tasks_days"), flags={"perm": "tasks"})
 async def cb_tasks_days(call: CallbackQuery, db: Database, db_user: dict[str, Any]) -> None:
     data = await tracker.tasks_per_day(db, db_user["id"], TASK_CHART_DAYS)
     if not any(data.total):
@@ -82,7 +85,7 @@ async def cb_tasks_days(call: CallbackQuery, db: Database, db_user: dict[str, An
     await _send_chart(call, png, "📊 Выполнение задач за 14 дней")
 
 
-@router.callback_query(StatsCb.filter(F.action == "tracker"))
+@router.callback_query(StatsCb.filter(F.action == "tracker"), flags={"perm": "tasks"})
 async def cb_tracker(call: CallbackQuery, db: Database, db_user: dict[str, Any]) -> None:
     await call.answer()
     await show(call, await tracker.tracker_text(db, db_user["id"]), stats_menu())

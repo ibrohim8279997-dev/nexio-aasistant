@@ -87,20 +87,23 @@ def fmt_money(amount: float, currency: str) -> str:
 
 
 async def create_expense(
-    db: Database, rates: RatesService, user_id: int, amount: float, currency: str, category: str, note: str | None
+    db: Database, rates: RatesService, user_id: int, amount: float, currency: str, category: str, note: str | None,
+    kind: str = "expense",
 ) -> tuple[int, RateInfo | None]:
     amount = validate_amount(amount, currency)
     category = clean_category(category)
     note = clean_note(note)
     info = await rates.try_get()
     expense_id = await db.add_expense(
-        user_id, amount, currency, category, note, info.rate if info else None, to_db(now_utc())
+        user_id, amount, currency, category, note, info.rate if info else None, to_db(now_utc()), kind
     )
     return expense_id, info
 
 
-def created_text(amount: float, currency: str, category: str, note: str | None, info: RateInfo | None) -> str:
-    lines = [f"💸 Записал: <b>{fmt_money(amount, currency)}</b> — {escape(category)}"]
+def created_text(amount: float, currency: str, category: str, note: str | None, info: RateInfo | None,
+                 kind: str = "expense") -> str:
+    icon, word = ("💰", "Доход") if kind == "income" else ("💸", "Записал")
+    lines = [f"{icon} {word}: <b>{fmt_money(amount, currency)}</b> — {escape(category)}"]
     if note:
         lines.append(f"📝 {escape(note)}")
     if info:
@@ -158,7 +161,13 @@ async def summary_text(db: Database, rates: RatesService, user_id: int, period: 
     rows = await db.expenses_between(user_id, start, end)
     title = f"💸 <b>Расходы за {PERIOD_TITLES[period]}</b>"
     if not rows:
-        return f"{title}\n\nРасходов нет."
+        incomes = await db.expenses_between(user_id, start, end, "income")
+        if not incomes:
+            return f"{title}\n\nРасходов нет."
+        rate_info = await rates.try_get()
+        inc = compute_totals(incomes, rate_info.rate if rate_info else None)
+        parts = " + ".join(fmt_money(v, c) for c, v in inc.native.items())
+        return f"{title}\n\nРасходов нет.\n\n💰 <b>Доходы</b>\nИтого: <b>{parts}</b>"
 
     info = await rates.try_get()
     totals = compute_totals(rows, info.rate if info else None)
@@ -177,6 +186,16 @@ async def summary_text(db: Database, rates: RatesService, user_id: int, period: 
         total = sum(totals.by_category_uzs.values()) or 1
         for cat, value in list(totals.by_category_uzs.items())[:10]:
             lines.append(f"• {escape(cat)}: {fmt_money(value, 'UZS')} ({value / total:.0%})")
+    incomes = await db.expenses_between(user_id, start, end, "income")
+    if incomes:
+        inc = compute_totals(incomes, info.rate if info else None)
+        lines.append("\n💰 <b>Доходы</b>")
+        if inc.uzs is not None and inc.usd is not None:
+            lines.append(f"Итого: <b>{fmt_money(inc.uzs, 'UZS')}</b> ≈ <b>{fmt_money(inc.usd, 'USD')}</b>")
+            if totals.uzs is not None:
+                lines.append(f"Баланс: <b>{fmt_money(inc.uzs - totals.uzs, 'UZS')}</b>")
+        else:
+            lines.append("Итого: <b>" + " + ".join(fmt_money(v, c) for c, v in inc.native.items()) + "</b>")
     if info and info.warning():
         lines.append("\n" + info.warning())
     return "\n".join(lines)

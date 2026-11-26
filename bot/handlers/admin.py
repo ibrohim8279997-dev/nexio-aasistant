@@ -11,6 +11,7 @@ from aiogram.types import Message
 from bot.config import Settings
 from bot.crypto import SecretStore
 from bot.db import Database
+from bot.services import perms
 from bot.services import subscription as sub
 from bot.timeutil import now_utc, to_db
 
@@ -24,6 +25,7 @@ ADMIN_HELP = (
     "/grant &lt;user_id&gt; &lt;дней&gt; — выдать/продлить доступ\n"
     "/revoke &lt;user_id&gt; — отключить доступ\n"
     "/users [страница] — пользователи\n"
+    "/perm &lt;user_id&gt; [право on|off] — права пользователя (tasks, finance, reminders, business, broadcasts, assistant)\n"
     "/stats — статистика бота\n"
     "/setsecret &lt;имя&gt; &lt;значение&gt; — сохранить секрет (шифруется)\n"
     "/secrets — список секретов, /delsecret &lt;имя&gt; — удалить"
@@ -78,6 +80,30 @@ async def cmd_revoke(message: Message, command: CommandObject, db: Database) -> 
         return
     await sub.revoke(db, user)
     await message.answer(f"⛔ Доступ для {user['tg_id']} отключён.")
+
+
+@router.message(Command("perm"))
+async def cmd_perm(message: Message, command: CommandObject, db: Database, settings: Settings) -> None:
+    args = _args(command)
+    if not args or not args[0].isdigit() or len(args) not in (1, 3):
+        await message.answer("Формат: /perm &lt;user_id&gt; [право on|off]")
+        return
+    user = await db.get_user_by_tg(int(args[0]))
+    if user is None:
+        await message.answer("Пользователь не найден.")
+        return
+    if len(args) == 3:
+        if args[2].lower() not in ("on", "off"):
+            await message.answer("Укажите on или off.")
+            return
+        try:
+            await perms.set_perm(db, user, args[1].lower(), args[2].lower() == "on")
+        except perms.PermError as exc:
+            await message.answer(f"⚠️ {escape(str(exc))}")
+            return
+    current = await perms.effective_perms(db, user, settings.admin_id)
+    lines = [f"{'✅' if p in current else '⛔'} {p}" for p in perms.USER_PERMS]
+    await message.answer(f"<b>Права {user['tg_id']}</b>\n" + "\n".join(lines))
 
 
 @router.message(Command("users"))

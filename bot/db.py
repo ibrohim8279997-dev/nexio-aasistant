@@ -197,6 +197,32 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_pending_actor ON pending_actions(actor, status, id);
     """,
+    # 4: доходы (kind), флаги прав пользователей, настройки пользователя
+    """
+    ALTER TABLE expenses ADD COLUMN kind TEXT NOT NULL DEFAULT 'expense' CHECK (kind IN ('income', 'expense'));
+    CREATE INDEX IF NOT EXISTS idx_expenses_user_kind ON expenses(user_id, kind, created_at);
+
+    CREATE TABLE IF NOT EXISTS user_perms (
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        perm       TEXT NOT NULL,
+        granted    INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, perm)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_settings (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        key     TEXT NOT NULL,
+        value   TEXT NOT NULL,
+        PRIMARY KEY (user_id, key)
+    );
+
+    UPDATE agents SET allowed_tables = (
+        SELECT json_group_array(value) FROM (
+            SELECT value FROM json_each(agents.allowed_tables)
+            UNION SELECT 'user_perms' UNION SELECT 'user_settings')
+    ) WHERE name = 'kimo' AND json_valid(allowed_tables);
+    """,
 ]
 
 # Откат миграций: номер -> SQL, возвращающий схему к предыдущей версии. Данные расходов и задач не трогаются.
@@ -211,6 +237,11 @@ DOWN_MIGRATIONS: dict[int, str] = {
         ALTER TABLE agents DROP COLUMN access_role;  ALTER TABLE agents DROP COLUMN created_by;
         ALTER TABLE agents DROP COLUMN last_seen;    ALTER TABLE agents DROP COLUMN status;
         ALTER TABLE agents DROP COLUMN status_detail; ALTER TABLE agents DROP COLUMN last_error;
+    """,
+    4: """
+        DROP TABLE IF EXISTS user_settings; DROP TABLE IF EXISTS user_perms;
+        DROP INDEX IF EXISTS idx_expenses_user_kind;
+        ALTER TABLE expenses DROP COLUMN kind;
     """,
 }
 
@@ -385,6 +416,34 @@ class Database:
         row = await self._one("SELECT COUNT(*) AS n FROM users WHERE sub_until > ?", (now,))
         return int(row["n"]) if row else 0
 
+    # ---------- права и настройки пользователя ----------
+
+    async def user_perm_rows(self, user_id: int) -> dict[str, bool]:
+        rows = await self._all("SELECT perm, granted FROM user_perms WHERE user_id = ?", (user_id,))
+        return {r["perm"]: bool(r["granted"]) for r in rows}
+
+    async def set_user_perm(self, user_id: int, perm: str, granted: bool, now: str) -> None:
+        await self._write(
+            """INSERT INTO user_perms (user_id, perm, granted, updated_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id, perm) DO UPDATE SET granted = excluded.granted, updated_at = excluded.updated_at""",
+            (user_id, perm, int(granted), now),
+        )
+
+    async def get_user_setting(self, user_id: int, key: str) -> str | None:
+        row = await self._one("SELECT value FROM user_settings WHERE user_id = ? AND key = ?", (user_id, key))
+        return row["value"] if row else None
+
+    async def user_settings(self, user_id: int) -> dict[str, str]:
+        rows = await self._all("SELECT key, value FROM user_settings WHERE user_id = ?", (user_id,))
+        return {r["key"]: r["value"] for r in rows}
+
+    async def set_user_setting(self, user_id: int, key: str, value: str) -> None:
+        await self._write(
+            """INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?)
+               ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value""",
+            (user_id, key, value),
+        )
+
     # ---------- задачи ----------
 
     async def add_task(self, user_id: int, text: str, due_at: str | None, has_time: bool, now: str) -> int:
@@ -488,22 +547,35 @@ class Database:
         note: str | None,
         rate_used: float | None,
         now: str,
+        kind: str = "expense",
     ) -> int:
+        if kind not in ("income", "expense"):
+            raise ValueError("kind должен быть income или expense")
         cur = await self._write(
-            """INSERT INTO expenses (user_id, amount, currency, category, note, rate_used, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, amount, currency, category, note, rate_used, now),
+            """INSERT INTO expenses (user_id, amount, currency, category, note, rate_used, created_at, kind)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, amount, currency, category, note, rate_used, now, kind),
         )
         return int(cur.lastrowid)
 
-    async def expenses_between(self, user_id: int, start: str, end: str) -> list[dict[str, Any]]:
+    async def expenses_between(self, user_id: int, start: str, end: str, kind: str | None = "expense") -> list[dict[str, Any]]:
+        """kind='expense' (по умолчанию), 'income' или None — все операции."""
+        if kind is None:
+            return await self._all(
+                "SELECT * FROM expenses WHERE user_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at",
+                (user_id, start, end),
+            )
         return await self._all(
-            "SELECT * FROM expenses WHERE user_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at",
-            (user_id, start, end),
+            "SELECT * FROM expenses WHERE user_id = ? AND kind = ? AND created_at >= ? AND created_at < ? ORDER BY created_at",
+            (user_id, kind, start, end),
         )
 
-    async def last_expense(self, user_id: int) -> dict[str, Any] | None:
-        return await self._one("SELECT * FROM expenses WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
+    async def last_expense(self, user_id: int, kind: str | None = None) -> dict[str, Any] | None:
+        if kind is None:
+            return await self._one("SELECT * FROM expenses WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
+        return await self._one(
+            "SELECT * FROM expenses WHERE user_id = ? AND kind = ? ORDER BY id DESC LIMIT 1", (user_id, kind)
+        )
 
     async def delete_expense(self, user_id: int, expense_id: int) -> bool:
         cur = await self._write("DELETE FROM expenses WHERE id = ? AND user_id = ?", (expense_id, user_id))

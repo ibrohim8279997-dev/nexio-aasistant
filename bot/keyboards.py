@@ -127,7 +127,10 @@ def task_move_kb(task_id: int, day: str) -> InlineKeyboardMarkup:
 def expenses_menu() -> InlineKeyboardMarkup:
     return _kb(
         [
-            [btn("Добавить расход", ExpCb(action="add"), "success", "➕")],
+            [
+                btn("Добавить расход", ExpCb(action="add"), "success", "➕"),
+                btn("Добавить доход", ExpCb(action="addinc"), "success", "💰"),
+            ],
             [
                 btn("День", ExpCb(action="sum", period="day"), "primary", "📅"),
                 btn("Неделя", ExpCb(action="sum", period="week"), "primary", "🗓"),

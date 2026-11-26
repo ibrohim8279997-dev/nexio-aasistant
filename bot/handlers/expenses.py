@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+from bot.middlewares import PermMiddleware
 from bot.db import Database
 from bot.handlers.common import send, show
 from bot.keyboards import ExpCb, Menu, cancel_kb, expenses_menu
@@ -17,6 +18,8 @@ from bot.services import expenses as svc
 from bot.services.rates import RatesService, RateUnavailableError
 
 router = Router(name="expenses")
+router.message.middleware(PermMiddleware("finance"))
+router.callback_query.middleware(PermMiddleware("finance"))
 
 ADD_HINT = (
     "Напишите расход: сумма, категория и заметка.\n"
@@ -27,8 +30,17 @@ ADD_HINT = (
 )
 
 
+INCOME_HINT = (
+    "Напишите доход: сумма, источник и заметка.\n"
+    "• «зарплата 5 млн»\n"
+    "• «оплата от клиента 300 usd»\n\n"
+    "Или отправьте голосовое."
+)
+
+
 class ExpenseStates(StatesGroup):
     adding = State()
+    adding_income = State()
 
 
 @router.callback_query(Menu.filter(F.name == "exp"))
@@ -38,15 +50,42 @@ async def cb_menu(call: CallbackQuery, state: FSMContext) -> None:
     await show(call, "💸 <b>Расходы</b>\nДобавьте расход или посмотрите итоги.", expenses_menu())
 
 
-async def _add_from_text(message: Message, raw: str, db: Database, rates: RatesService, user_id: int) -> bool:
+async def _add_from_text(message: Message, raw: str, db: Database, rates: RatesService, user_id: int,
+                         kind: str = "expense") -> bool:
     try:
         p = svc.parse_expense_input(raw)
-        _, info = await svc.create_expense(db, rates, user_id, p.amount, p.currency, p.category, p.note)
+        _, info = await svc.create_expense(db, rates, user_id, p.amount, p.currency, p.category, p.note, kind)
     except svc.ExpenseInputError as exc:
-        await message.answer(f"⚠️ {exc}\n\n{ADD_HINT}", reply_markup=cancel_kb())
+        await message.answer(f"⚠️ {exc}\n\n{INCOME_HINT if kind == 'income' else ADD_HINT}", reply_markup=cancel_kb())
         return False
-    await message.answer(svc.created_text(p.amount, p.currency, p.category, p.note, info), reply_markup=expenses_menu())
+    await message.answer(
+        svc.created_text(p.amount, p.currency, p.category, p.note, info, kind), reply_markup=expenses_menu()
+    )
     return True
+
+
+@router.message(Command("income"))
+async def cmd_income(
+    message: Message, command: CommandObject, state: FSMContext, db: Database, rates: RatesService, db_user: dict[str, Any]
+) -> None:
+    if command.args:
+        await _add_from_text(message, command.args, db, rates, db_user["id"], "income")
+        return
+    await state.set_state(ExpenseStates.adding_income)
+    await message.answer(INCOME_HINT, reply_markup=cancel_kb())
+
+
+@router.callback_query(ExpCb.filter(F.action == "addinc"))
+async def cb_add_income(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(ExpenseStates.adding_income)
+    await call.answer()
+    await send(call, INCOME_HINT, cancel_kb())
+
+
+@router.message(ExpenseStates.adding_income, F.text, ~F.text.startswith("/"))
+async def on_income_text(message: Message, state: FSMContext, db: Database, rates: RatesService, db_user: dict[str, Any]) -> None:
+    if await _add_from_text(message, message.text or "", db, rates, db_user["id"], "income"):
+        await state.clear()
 
 
 @router.message(Command("spend"))

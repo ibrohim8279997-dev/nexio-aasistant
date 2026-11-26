@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from bot.agents.registry import TOKEN_RE
 
 from bot.keyboards import subscription_kb
+from bot.services import perms as perms_svc
 from bot.services.subscription import PAYWALL_TEXT, PRIVATE_TEXT, has_access
 from bot.timeutil import now_utc, to_db
 
@@ -97,6 +98,29 @@ class AccessMiddleware(BaseMiddleware):
             await event.answer()
             if event.bot is not None:
                 await event.bot.send_message(event.from_user.id, text, reply_markup=markup)
+        return None
+
+
+NO_PERM_TEXT = "🔒 Эта функция вам недоступна. Её может включить владелец."
+
+
+class PermMiddleware(BaseMiddleware):
+    """Проверка флага права. Право берётся из флага хендлера perm=..., иначе из значения по умолчанию роутера."""
+
+    def __init__(self, default: str | None = None) -> None:
+        self.default = default
+
+    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        perm = get_flag(data, "perm") or self.default
+        db_user = data.get("db_user")
+        if not perm or db_user is None:
+            return await handler(event, data)
+        if await perms_svc.can(data["db"], db_user, perm, data["settings"].admin_id):
+            return await handler(event, data)
+        if isinstance(event, CallbackQuery):
+            await event.answer(NO_PERM_TEXT, show_alert=True)
+        elif isinstance(event, Message):
+            await event.answer(NO_PERM_TEXT)
         return None
 
 

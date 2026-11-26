@@ -38,6 +38,9 @@ METHOD_TABLES: dict[str, frozenset[str]] = {
         "add_payment": ["payments"], "payments_summary": ["payments"],
         # rates_cache
         "save_rate": ["rates_cache"], "last_rate": ["rates_cache"],
+        # права и настройки пользователей
+        "user_perm_rows": ["user_perms"], "set_user_perm": ["user_perms"],
+        "get_user_setting": ["user_settings"], "user_settings": ["user_settings"], "set_user_setting": ["user_settings"],
         # собственная таблица ассистента
         "add_note": ["agent_assistant_notes"], "list_notes": ["agent_assistant_notes"],
         "delete_note": ["agent_assistant_notes"],

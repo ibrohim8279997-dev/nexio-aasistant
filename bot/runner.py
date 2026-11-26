@@ -21,6 +21,7 @@ from bot.agents.context import AgentContext
 from bot.agents.health import AgentState, Heartbeat
 from bot.agents.registry import NAME_RE, AgentConfig, Registry
 from bot.ai.llm import make_llm
+from bot.ai.queue import LLMQueue, QueuedLLM, UserLimiter
 from bot.config import BASE_DIR, ConfigError, Settings, load_settings
 from bot.crypto import Crypto, DecryptError, SecretStore
 from bot.db import Database
@@ -77,7 +78,8 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
         # токен агента тоже вырезаем из логов
         setup_logging(settings.log_level, [*settings.secret_values, token], BASE_DIR / "logs", name)
 
-        llm = make_llm(settings, agent.provider, agent.text_model, agent.stt_model)
+        inner = make_llm(settings, agent.provider, agent.text_model, agent.stt_model)
+        llm = QueuedLLM(inner, LLMQueue(settings.llm_concurrency, UserLimiter(settings.user_ai_per_min, settings.user_ai_per_day)))
         bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         bus = Bus(db, agent.name, owner_id=settings.admin_id, display=agent.display_name)
         state = AgentState(started_at=time.time())
@@ -89,7 +91,7 @@ async def run(name: str, settings: Settings, crypto: Crypto) -> None:
         interrupted = await db.queue_fail_interrupted(agent.name, _now())
         if interrupted:
             log.warning("Помечено прерванных заданий: %s", interrupted)
-        llm.on_rate_limit = rate_notifier(bot, settings.admin_id, agent.display_name)  # type: ignore[attr-defined]
+        inner.on_rate_limit = rate_notifier(bot, settings.admin_id, agent.display_name)  # type: ignore[attr-defined]
         heartbeat = Heartbeat(db, agent.name, state, llm)
         await heartbeat.beat()  # сразу online: Кимо видит живой процесс, не дожидаясь первого интервала
         heartbeat_task = asyncio.create_task(heartbeat.run())

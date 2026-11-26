@@ -58,6 +58,9 @@ class Settings:
     sub_days: int
     click_price_uzs: int
     log_level: str
+    llm_concurrency: int = 2  # одновременных запросов к LLM в процессе
+    user_ai_per_min: int = 6  # обращений к ИИ на пользователя (не владельца) в минуту
+    user_ai_per_day: int = 150
 
     @property
     def secret_values(self) -> list[str]:
@@ -91,6 +94,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         sub_days=_int("SUB_DAYS", 30),
         click_price_uzs=_int("CLICK_PRICE_UZS", 49000),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        llm_concurrency=_int("LLM_CONCURRENCY", 2),
+        user_ai_per_min=_int("USER_AI_PER_MIN", 6),
+        user_ai_per_day=_int("USER_AI_PER_DAY", 150),
     )
     if settings.admin_id <= 0:
         raise ConfigError("ADMIN_ID должен быть вашим числовым Telegram ID")

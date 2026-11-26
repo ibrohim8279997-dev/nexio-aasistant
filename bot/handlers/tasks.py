@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+from bot.middlewares import PermMiddleware
 from bot.db import Database
 from bot.handlers.common import send, show
 from bot.keyboards import Menu, TaskCb, cancel_kb, task_list_kb, task_move_kb, tasks_menu
@@ -17,6 +18,8 @@ from bot.services import tasks as svc
 from bot.timeutil import from_db, now_local, to_db
 
 router = Router(name="tasks")
+router.message.middleware(PermMiddleware("tasks"))
+router.callback_query.middleware(PermMiddleware("tasks"))
 
 ADD_HINT = (
     "Напишите задачу. Можно с датой и временем:\n"

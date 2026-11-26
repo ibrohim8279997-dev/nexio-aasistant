@@ -64,6 +64,7 @@ class AssistantDeps:
     is_owner: bool = False
     offer_restart: Any = None  # async (AgentConfig, text) -> str: предложить перезапуск с подтверждением
     admin: Any = None  # AdminActions
+    perms: frozenset[str] | None = None  # None — без ограничений (владелец, шина); иначе действующие права пользователя
     consulted: list[str] = field(default_factory=list)  # какие агенты отвечали (для audit_log голосовых обращений)
 
 
@@ -79,8 +80,31 @@ async def execute(actions: list[Any], deps: AssistantDeps) -> list[Answer]:
     return answers
 
 
+NO_RIGHTS = Answer("🔒 Эта функция вам недоступна. Её может включить владелец.")
+# какое право нужно для действия
+_NEEDS: tuple[tuple[Any, str], ...] = (
+    (AddTask, "tasks"), (CompleteTask, "tasks"), (ListTasks, "tasks"), (ListReminders, "reminders"),
+    (AddExpense, "finance"),
+    (Delegate, "agents_manage"), (CreateAgent, "agents_manage"),
+    (ManageAgent, "agents_manage"), (AgentsReport, "agents_manage"), (AgentLogs, "agents_manage"),
+    (AgentTables, "agents_manage"), (AgentData, "agents_manage"), (DiagnoseAgent, "agents_manage"),
+)
+
+
+def needed_perm(action: Any) -> str | None:
+    if isinstance(action, ShowStats):
+        return "finance" if action.topic == "expenses" else "tasks"
+    for cls, perm in _NEEDS:
+        if isinstance(action, cls):
+            return perm
+    return None
+
+
 async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
     db, user_id = deps.db, deps.user["id"]
+    need = needed_perm(action)
+    if deps.perms is not None and need and need not in deps.perms:
+        return NO_RIGHTS
 
     if isinstance(action, AddTask):
         due, has_time = tasks_service.resolve_due(action.date, action.time, now_local())
@@ -99,11 +123,12 @@ async def _execute_one(action: Any, deps: AssistantDeps) -> Answer:
 
     if isinstance(action, AddExpense):
         _, info = await expenses_service.create_expense(
-            db, deps.rates, user_id, action.amount, action.currency, action.category, action.note
+            db, deps.rates, user_id, action.amount, action.currency, action.category, action.note, action.kind
         )
         return Answer(
             expenses_service.created_text(
-                action.amount, action.currency, expenses_service.clean_category(action.category), action.note, info
+                action.amount, action.currency, expenses_service.clean_category(action.category), action.note, info,
+                action.kind,
             )
         )
 

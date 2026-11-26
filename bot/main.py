@@ -35,6 +35,7 @@ COMMANDS = [
     BotCommand(command="tomorrow", description="Задачи на завтра"),
     BotCommand(command="add", description="Добавить задачу"),
     BotCommand(command="spend", description="Добавить расход"),
+    BotCommand(command="income", description="Добавить доход"),
     BotCommand(command="subscription", description="Подписка"),
     BotCommand(command="paysupport", description="Помощь с оплатой"),
     BotCommand(command="agents", description="Агенты (для владельца)"),
